@@ -252,33 +252,54 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.video:
         return
 
-    print("📩 VIDEO RECEIVED")
-
     video = update.message.video
     caption = update.message.caption or "Viral Short 2026"
 
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
-        temp_path = tmp.name
-
-    # ✅ FIXED ASYNC BUG HERE
-    file = await context.bot.get_file(video.file_id)
-    await file.download_to_drive(temp_path)
-
-    metadata = await generate_metadata(caption)
+    # STEP 1 — Starting
+    status_msg = await update.message.reply_text("📥 Downloading video...")
 
     try:
+        # Download
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
+            temp_path = tmp.name
+
+        file = await context.bot.get_file(video.file_id)
+        await file.download_to_drive(temp_path)
+
+        await status_msg.edit_text("🧠 Generating AI metadata...\n\n⏳ Creating viral title & description")
+
+        # STEP 2 — Metadata
+        metadata = await generate_metadata(caption)
+
+        await status_msg.edit_text(
+            f"🧠 Metadata Ready ✅\n\n"
+            f"🏷 Title:\n{metadata['title']}\n\n"
+            f"🚀 Uploading to YouTube..."
+        )
+
+        # STEP 3 — Upload
         url = await upload_video(temp_path, metadata)
-        await update.message.reply_text(f"✅ Uploaded\n{url}")
+
+        await status_msg.edit_text(
+            f"✅ Upload Success!\n\n"
+            f"🔗 {url}"
+        )
+
         update_stats(True)
         os.remove(temp_path)
 
     except Exception as e:
-        upload_queue.append({"file": temp_path, "meta": metadata})
+
+        print("PROCESS ERROR:", e)
+
+        upload_queue.append({"file": temp_path, "meta": metadata if 'metadata' in locals() else {}})
         save_json(QUEUE_FILE, upload_queue)
         update_stats(False)
 
-        await update.message.reply_text("⚠️ Added to Auto Retry Queue")
-
+        await status_msg.edit_text(
+            "⚠️ Upload failed.\n"
+            "Added to Auto Retry Queue."
+        )
 
 # ==========================================================
 # ADMIN COMMAND
@@ -340,3 +361,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
