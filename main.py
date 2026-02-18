@@ -255,51 +255,109 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     video = update.message.video
     caption = update.message.caption or "Viral Short 2026"
 
-    # STEP 1 — Starting
-    status_msg = await update.message.reply_text("📥 Downloading video...")
+    start_time = time.time()
+    progress_msg = await update.message.reply_text("🚀 Processing your Short...\n")
 
     try:
-        # Download
+        # =========================
+        # STEP 1 — DOWNLOAD
+        # =========================
+        await progress_msg.edit_text("📥 Step 1/5\nDownloading video...")
+
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
             temp_path = tmp.name
 
         file = await context.bot.get_file(video.file_id)
         await file.download_to_drive(temp_path)
 
-        await status_msg.edit_text("🧠 Generating AI metadata...\n\n⏳ Creating viral title & description")
+        await progress_msg.edit_text("✅ Step 1/5 Completed\n\n🧠 Step 2/5\nAnalyzing trend...")
 
-        # STEP 2 — Metadata
-        metadata = await generate_metadata(caption)
+        # =========================
+        # STEP 2 — TREND ANALYSIS
+        # =========================
+        trend_value = trend_score(caption)
+        await asyncio.sleep(1)
 
-        await status_msg.edit_text(
-            f"🧠 Metadata Ready ✅\n\n"
-            f"🏷 Title:\n{metadata['title']}\n\n"
-            f"🚀 Uploading to YouTube..."
+        await progress_msg.edit_text(
+            f"📈 Trend Score: {trend_value}/15\n\n"
+            "🧠 Step 3/5\nGenerating AI Metadata..."
         )
 
-        # STEP 3 — Upload
+        # =========================
+        # STEP 3 — METADATA
+        # =========================
+        metadata = await generate_metadata(caption)
+
+        await progress_msg.edit_text(
+            f"🏷 Title Selected:\n{metadata['title'][:60]}...\n\n"
+            "🖼 Step 4/5\nGenerating Thumbnail..."
+        )
+
+        # =========================
+        # STEP 4 — THUMBNAIL
+        # =========================
+        thumb_path = generate_thumbnail(temp_path, metadata["title"])
+
+        if thumb_path:
+            await update.message.reply_photo(
+                photo=open(thumb_path, "rb"),
+                caption="🖼 Thumbnail Preview"
+            )
+
+        await progress_msg.edit_text(
+            "🚀 Step 5/5\nUploading to YouTube...\n\n"
+            "⏳ Please wait..."
+        )
+
+        # =========================
+        # STEP 5 — UPLOAD
+        # =========================
         url = await upload_video(temp_path, metadata)
 
-        await status_msg.edit_text(
-            f"✅ Upload Success!\n\n"
-            f"🔗 {url}"
+        total_time = round(time.time() - start_time, 2)
+
+        await progress_msg.edit_text(
+            "🎉 UPLOAD SUCCESS 🎉\n\n"
+            f"🔗 {url}\n\n"
+            f"⏱ Process Time: {total_time}s\n"
+            f"🔥 Trend Score: {trend_value}"
         )
 
         update_stats(True)
+
+        if ADMIN_CHAT_ID:
+            await context.bot.send_message(
+                ADMIN_CHAT_ID,
+                f"✅ Upload Success\n{url}\nTime: {total_time}s"
+            )
+
         os.remove(temp_path)
+        if thumb_path:
+            os.remove(thumb_path)
 
     except Exception as e:
 
         print("PROCESS ERROR:", e)
 
-        upload_queue.append({"file": temp_path, "meta": metadata if 'metadata' in locals() else {}})
+        upload_queue.append({
+            "file": temp_path,
+            "meta": metadata if 'metadata' in locals() else {}
+        })
+
         save_json(QUEUE_FILE, upload_queue)
         update_stats(False)
 
-        await status_msg.edit_text(
-            "⚠️ Upload failed.\n"
-            "Added to Auto Retry Queue."
+        await progress_msg.edit_text(
+            "⚠️ Upload Failed\n"
+            "Added to Smart Retry Queue.\n\n"
+            f"Error: {str(e)[:100]}"
         )
+
+        if ADMIN_CHAT_ID:
+            await context.bot.send_message(
+                ADMIN_CHAT_ID,
+                f"❌ Upload Failed\nError: {str(e)}"
+            )
 
 # ==========================================================
 # ADMIN COMMAND
@@ -361,4 +419,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
