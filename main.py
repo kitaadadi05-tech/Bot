@@ -9,10 +9,16 @@ import re
 import random
 import cv2
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 
 from telegram import Update
-from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, ContextTypes, filters
+from telegram.ext import (
+    ApplicationBuilder,
+    MessageHandler,
+    CommandHandler,
+    ContextTypes,
+    filters
+)
 
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
@@ -47,8 +53,11 @@ BOT_APP = None
 # ==========================================================
 def load_json(path, default):
     if os.path.exists(path):
-        with open(path, "r") as f:
-            return json.load(f)
+        try:
+            with open(path, "r") as f:
+                return json.load(f)
+        except:
+            return default
     return default
 
 
@@ -86,7 +95,7 @@ def update_stats(success=True):
 
 
 # ==========================================================
-# SMART RESET ESTIMATION
+# RESET ESTIMATION
 # ==========================================================
 def save_limit_hit():
     data = {
@@ -100,23 +109,29 @@ def get_reset_remaining():
     data = load_json(LIMIT_FILE, None)
     if not data:
         return 0
-    return int(data["estimated_reset"] - time.time())
+    remaining = int(data["estimated_reset"] - time.time())
+    return max(0, remaining)
 
 
 # ==========================================================
 # YOUTUBE AUTH
 # ==========================================================
 def get_youtube_service():
+    if not os.path.exists(TOKEN_FILE):
+        raise Exception("token.json tidak ditemukan")
+
     creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
+
     if creds.expired and creds.refresh_token:
         creds.refresh(Request())
         with open(TOKEN_FILE, "w") as token:
             token.write(creds.to_json())
+
     return build("youtube", "v3", credentials=creds)
 
 
 # ==========================================================
-# ML METADATA OPTIMIZER
+# TITLE SCORING
 # ==========================================================
 def score_title(title):
     score = 0
@@ -126,14 +141,16 @@ def score_title(title):
         if w.lower() in title.lower():
             score += 5
 
-    length = len(title)
-    if 45 <= length <= 70:
+    if 45 <= len(title) <= 70:
         score += 10
 
     score += random.randint(0, 3)
     return score
 
 
+# ==========================================================
+# METADATA GENERATOR
+# ==========================================================
 async def generate_metadata(keyword):
 
     prompt = f"""
@@ -164,8 +181,14 @@ Return JSON.
             headers=headers,
             json=payload)
 
-    content = r.json()["choices"][0]["message"]["content"]
+    result = r.json()
+
+    if "choices" not in result:
+        raise Exception("AI response invalid")
+
+    content = result["choices"][0]["message"]["content"]
     content = re.sub(r"```json|```", "", content)
+
     data = json.loads(re.search(r"\{.*\}", content, re.DOTALL).group())
 
     best_title = max(data["titles"], key=score_title)
@@ -178,48 +201,14 @@ Return JSON.
 
 
 # ==========================================================
-# ML THUMBNAIL SELECTOR
-# ==========================================================
-def generate_thumbnail(video_path, text):
-
-    cap = cv2.VideoCapture(video_path)
-    frames = []
-
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-        frames.append(frame)
-
-    cap.release()
-
-    if not frames:
-        return None
-
-    best_frame = max(frames, key=lambda f: np.mean(cv2.cvtColor(f, cv2.COLOR_BGR2GRAY)))
-
-    img = Image.fromarray(cv2.cvtColor(best_frame, cv2.COLOR_BGR2RGB))
-    draw = ImageDraw.Draw(img)
-
-    draw.text((50, 50), text[:20], fill="yellow")
-
-    thumb_path = video_path.replace(".mp4", "_thumb.jpg")
-    img.save(thumb_path)
-
-    return thumb_path
-
-
-# ==========================================================
 # UPLOAD
 # ==========================================================
 async def upload_video(path, metadata):
-
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, _upload_sync, path, metadata)
 
 
 def _upload_sync(path, metadata):
-
     youtube = get_youtube_service()
 
     body = {
@@ -245,10 +234,9 @@ def _upload_sync(path, metadata):
 
 
 # ==========================================================
-# AUTO SCALING ENGINE
+# AUTO RETRY ENGINE (SAFE)
 # ==========================================================
 async def auto_retry_engine():
-
     global upload_limit_reached
 
     while True:
@@ -257,18 +245,17 @@ async def auto_retry_engine():
         if not upload_queue:
             continue
 
-        if upload_limit_reached:
-            if get_reset_remaining() > 0:
-                continue
-            upload_limit_reached = False
+        if upload_limit_reached and get_reset_remaining() > 0:
+            continue
 
+        upload_limit_reached = False
         item = upload_queue.pop(0)
 
         try:
             url = await upload_video(item["file"], item["meta"])
             update_stats(True)
 
-            if ADMIN_CHAT_ID:
+            if ADMIN_CHAT_ID and BOT_APP:
                 await BOT_APP.bot.send_message(
                     ADMIN_CHAT_ID,
                     f"✅ Auto Retry Success\n{url}"
@@ -276,7 +263,8 @@ async def auto_retry_engine():
 
             os.remove(item["file"])
 
-        except Exception:
+        except Exception as e:
+            logging.error(e)
             upload_queue.append(item)
             update_stats(False)
 
@@ -287,20 +275,20 @@ async def auto_retry_engine():
 # VIDEO HANDLER
 # ==========================================================
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
     global upload_limit_reached
 
-    video = update.message.video
-    caption = update.message.caption or "Amazing Short"
-
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
-        temp_path = tmp.name
-        await context.bot.get_file(video.file_id).download_to_drive(temp_path)
-
-    metadata = await generate_metadata(caption)
-
     try:
+        video = update.message.video
+        caption = update.message.caption or "Amazing Short"
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
+            temp_path = tmp.name
+            await context.bot.get_file(video.file_id).download_to_drive(temp_path)
+
+        metadata = await generate_metadata(caption)
+
         url = await upload_video(temp_path, metadata)
+
         await update.message.reply_text(f"✅ Uploaded\n{url}")
         update_stats(True)
         os.remove(temp_path)
@@ -309,6 +297,7 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if "uploadLimitExceeded" in str(e):
             upload_limit_reached = True
             save_limit_hit()
+
             upload_queue.append({"file": temp_path, "meta": metadata})
             save_json(QUEUE_FILE, upload_queue)
 
@@ -319,12 +308,15 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
             update_stats(False)
             await update.message.reply_text("❌ Upload failed")
 
+    except Exception as e:
+        logging.error(e)
+        await update.message.reply_text("❌ System error")
+
 
 # ==========================================================
-# ADMIN COMMAND
+# ADMIN STATS
 # ==========================================================
 async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
     stats = load_json(STATS_FILE, {})
     queue_len = len(upload_queue)
 
@@ -337,23 +329,34 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ==========================================================
+# STARTUP (FIX EVENT LOOP)
+# ==========================================================
+async def on_startup(app):
+    global BOT_APP, upload_queue
+
+    BOT_APP = app
+    upload_queue = load_json(QUEUE_FILE, [])
+
+    app.create_task(auto_retry_engine())
+
+    logging.info("✅ Background engine started")
+
+
+# ==========================================================
 # MAIN
 # ==========================================================
 def main():
-
-    global BOT_APP, upload_queue
-
-    upload_queue = load_json(QUEUE_FILE, [])
+    if not TELEGRAM_TOKEN:
+        raise Exception("TELEGRAM_TOKEN tidak ditemukan")
 
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    BOT_APP = app
 
     app.add_handler(MessageHandler(filters.VIDEO, handle_video))
     app.add_handler(CommandHandler("stats", stats_cmd))
 
-    app.create_task(auto_retry_engine())
+    app.post_init = on_startup
 
-    print("🚀 AUTO SCALING SHORTS MACHINE RUNNING")
+    logging.info("🚀 AUTO SCALING SHORTS MACHINE RUNNING")
     app.run_polling(drop_pending_updates=True)
 
 
