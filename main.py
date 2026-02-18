@@ -333,8 +333,13 @@ async def on_startup(app):
     global BOT_APP, upload_queue
     BOT_APP = app
     upload_queue = load_json(QUEUE_FILE, [])
-    app.create_task(auto_retry_engine())
-    print("✅ Background engine started")
+
+    async def delayed_start():
+        await asyncio.sleep(2)
+        asyncio.create_task(auto_retry_engine())
+        print("✅ Background engine started")
+
+    asyncio.create_task(delayed_start())
 
 
 # ==========================================================
@@ -360,3 +365,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
