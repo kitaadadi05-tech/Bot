@@ -175,20 +175,22 @@ Return JSON.
     content = r.json()["choices"][0]["message"]["content"]
     content = re.sub(r"```json|```", "", content)
 
-    try:
+        try:
         data = json.loads(re.search(r"\{.*\}", content, re.DOTALL).group())
-        best_title = max(data["titles"], key=trend_score)
-    except:
-        return {
-            "title": "Amazing Viral Short 2026",
-            "description": "#shorts Amazing Viral Content",
-            "hashtags": ["shorts", "viral", "trend"]
-        }
+        best_title = max(data.get("titles", ["Amazing Viral Short 2026"]), key=trend_score)
+
+        description = data.get("description", "#shorts Viral Content 2026")
+        hashtags = data.get("hashtags", ["shorts", "viral", "trend"])
+
+    except Exception:
+        best_title = "Amazing Viral Short 2026"
+        description = "#shorts Amazing Viral Content"
+        hashtags = ["shorts", "viral", "trend"]
 
     return {
         "title": best_title[:90],
-        "description": data["description"],
-        "hashtags": data["hashtags"]
+        "description": description,
+        "hashtags": hashtags
     }
 
 
@@ -234,9 +236,9 @@ def _upload_sync(path, metadata, progress_callback=None):
 
     body = {
         "snippet": {
-            "title": metadata["title"],
-            "description": metadata["description"],
-            "tags": metadata["hashtags"],
+          "title": metadata.get("title", "Viral Short 2026"),
+            "description": metadata.get("description", "#shorts Viral Content"),
+            "tags": metadata.get("hashtags", ["shorts","viral"]),
             "categoryId": metadata.get("category", "22")
         },
         "status": {"privacyStatus": "public"}
@@ -448,6 +450,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
