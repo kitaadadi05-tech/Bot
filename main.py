@@ -17,7 +17,7 @@ from telegram.ext import (
     MessageHandler,
     CommandHandler,
     ContextTypes,
-    filters
+    filters,
 )
 
 from google.oauth2.credentials import Credentials
@@ -28,11 +28,13 @@ from googleapiclient.errors import HttpError
 
 
 # ==========================================================
-# ENV CONFIG
+# ENV
 # ==========================================================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
+BASE_URL = os.getenv("BASE_URL")
+PORT = int(os.getenv("PORT", 8080))
 
 SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
 TOKEN_FILE = "token.json"
@@ -49,15 +51,12 @@ BOT_APP = None
 
 
 # ==========================================================
-# SAFE JSON UTIL
+# JSON SAFE
 # ==========================================================
 def load_json(path, default):
     if os.path.exists(path):
-        try:
-            with open(path, "r") as f:
-                return json.load(f)
-        except:
-            return default
+        with open(path, "r") as f:
+            return json.load(f)
     return default
 
 
@@ -95,73 +94,55 @@ def update_stats(success=True):
 
 
 # ==========================================================
-# RESET ESTIMATION
+# MONETIZATION SAFE FILTER
 # ==========================================================
-def save_limit_hit():
-    data = {
-        "last_hit": time.time(),
-        "estimated_reset": time.time() + 86400
-    }
-    save_json(LIMIT_FILE, data)
+BANNED_WORDS = [
+    "kill", "blood", "sex", "nude", "weapon",
+    "fight", "drug", "suicide", "hate"
+]
 
-
-def get_reset_remaining():
-    data = load_json(LIMIT_FILE, None)
-    if not data:
-        return 0
-    remaining = int(data["estimated_reset"] - time.time())
-    return max(0, remaining)
+def monetization_safe(text):
+    for word in BANNED_WORDS:
+        if word in text.lower():
+            return False
+    return True
 
 
 # ==========================================================
-# YOUTUBE AUTH
+# AI TREND ANALYZER
 # ==========================================================
-def get_youtube_service():
-    if not os.path.exists(TOKEN_FILE):
-        raise Exception("token.json tidak ditemukan")
+def trend_score(keyword):
+    trend_words = [
+        "2026", "viral", "ai", "secret",
+        "new", "trend", "insane", "hack"
+    ]
 
-    creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
-
-    if creds.expired and creds.refresh_token:
-        creds.refresh(Request())
-        with open(TOKEN_FILE, "w") as token:
-            token.write(creds.to_json())
-
-    return build("youtube", "v3", credentials=creds)
-
-
-# ==========================================================
-# TITLE SCORING
-# ==========================================================
-def score_title(title):
     score = 0
-    power_words = ["INSANE", "SHOCKING", "SECRET", "UNBELIEVABLE", "BEST"]
-
-    for w in power_words:
-        if w.lower() in title.lower():
+    for w in trend_words:
+        if w in keyword.lower():
             score += 5
 
-    if 45 <= len(title) <= 70:
-        score += 10
-
-    score += random.randint(0, 3)
+    score += random.randint(1, 5)
     return score
 
 
 # ==========================================================
-# METADATA GENERATOR
+# AI METADATA GENERATOR
 # ==========================================================
 async def generate_metadata(keyword):
 
+    if not monetization_safe(keyword):
+        keyword = "Amazing Viral Short"
+
     prompt = f"""
 Generate:
-- 5 viral titles
-- 1 description with #shorts
+- 5 viral YouTube Shorts titles
+- 1 SEO description including #shorts
 - 12 hashtags
 
-Keyword: {keyword}
+Topic: {keyword}
 
-Return JSON.
+Return JSON format.
 """
 
     headers = {
@@ -181,17 +162,11 @@ Return JSON.
             headers=headers,
             json=payload)
 
-    result = r.json()
-
-    if "choices" not in result:
-        raise Exception("AI response invalid")
-
-    content = result["choices"][0]["message"]["content"]
+    content = r.json()["choices"][0]["message"]["content"]
     content = re.sub(r"```json|```", "", content)
-
     data = json.loads(re.search(r"\{.*\}", content, re.DOTALL).group())
 
-    best_title = max(data["titles"], key=score_title)
+    best_title = max(data["titles"], key=trend_score)
 
     return {
         "title": best_title[:90],
@@ -201,14 +176,55 @@ Return JSON.
 
 
 # ==========================================================
-# UPLOAD
+# THUMBNAIL SELECTOR
 # ==========================================================
+def generate_thumbnail(video_path, text):
+
+    cap = cv2.VideoCapture(video_path)
+    frames = []
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        frames.append(frame)
+
+    cap.release()
+
+    if not frames:
+        return None
+
+    best_frame = max(frames, key=lambda f: np.mean(cv2.cvtColor(f, cv2.COLOR_BGR2GRAY)))
+
+    img = Image.fromarray(cv2.cvtColor(best_frame, cv2.COLOR_BGR2RGB))
+    draw = ImageDraw.Draw(img)
+    draw.text((50, 50), text[:25], fill="yellow")
+
+    thumb_path = video_path.replace(".mp4", "_thumb.jpg")
+    img.save(thumb_path)
+
+    return thumb_path
+
+
+# ==========================================================
+# YOUTUBE UPLOAD
+# ==========================================================
+def get_youtube_service():
+    creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
+    if creds.expired and creds.refresh_token:
+        creds.refresh(Request())
+        with open(TOKEN_FILE, "w") as token:
+            token.write(creds.to_json())
+    return build("youtube", "v3", credentials=creds)
+
+
 async def upload_video(path, metadata):
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, _upload_sync, path, metadata)
 
 
 def _upload_sync(path, metadata):
+
     youtube = get_youtube_service()
 
     body = {
@@ -234,7 +250,7 @@ def _upload_sync(path, metadata):
 
 
 # ==========================================================
-# AUTO RETRY ENGINE (SAFE)
+# AUTO RETRY ENGINE
 # ==========================================================
 async def auto_retry_engine():
     global upload_limit_reached
@@ -245,17 +261,13 @@ async def auto_retry_engine():
         if not upload_queue:
             continue
 
-        if upload_limit_reached and get_reset_remaining() > 0:
-            continue
-
-        upload_limit_reached = False
         item = upload_queue.pop(0)
 
         try:
             url = await upload_video(item["file"], item["meta"])
             update_stats(True)
 
-            if ADMIN_CHAT_ID and BOT_APP:
+            if ADMIN_CHAT_ID:
                 await BOT_APP.bot.send_message(
                     ADMIN_CHAT_ID,
                     f"✅ Auto Retry Success\n{url}"
@@ -263,8 +275,7 @@ async def auto_retry_engine():
 
             os.remove(item["file"])
 
-        except Exception as e:
-            logging.error(e)
+        except Exception:
             upload_queue.append(item)
             update_stats(False)
 
@@ -272,51 +283,38 @@ async def auto_retry_engine():
 
 
 # ==========================================================
-# VIDEO HANDLER
+# HANDLER
 # ==========================================================
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global upload_limit_reached
+
+    video = update.message.video
+    caption = update.message.caption or "Viral Short 2026"
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
+        temp_path = tmp.name
+        await context.bot.get_file(video.file_id).download_to_drive(temp_path)
+
+    metadata = await generate_metadata(caption)
 
     try:
-        video = update.message.video
-        caption = update.message.caption or "Amazing Short"
-
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
-            temp_path = tmp.name
-            await context.bot.get_file(video.file_id).download_to_drive(temp_path)
-
-        metadata = await generate_metadata(caption)
-
         url = await upload_video(temp_path, metadata)
-
         await update.message.reply_text(f"✅ Uploaded\n{url}")
         update_stats(True)
         os.remove(temp_path)
 
-    except HttpError as e:
-        if "uploadLimitExceeded" in str(e):
-            upload_limit_reached = True
-            save_limit_hit()
+    except Exception:
+        upload_queue.append({"file": temp_path, "meta": metadata})
+        save_json(QUEUE_FILE, upload_queue)
+        update_stats(False)
 
-            upload_queue.append({"file": temp_path, "meta": metadata})
-            save_json(QUEUE_FILE, upload_queue)
-
-            await update.message.reply_text(
-                f"⚠️ Limit reached.\nReset in {get_reset_remaining()//3600} hours"
-            )
-        else:
-            update_stats(False)
-            await update.message.reply_text("❌ Upload failed")
-
-    except Exception as e:
-        logging.error(e)
-        await update.message.reply_text("❌ System error")
+        await update.message.reply_text("⚠️ Added to Auto Retry Queue")
 
 
 # ==========================================================
 # ADMIN STATS
 # ==========================================================
 async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     stats = load_json(STATS_FILE, {})
     queue_len = len(upload_queue)
 
@@ -329,25 +327,20 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ==========================================================
-# STARTUP (FIX EVENT LOOP)
+# STARTUP TASK
 # ==========================================================
 async def on_startup(app):
     global BOT_APP, upload_queue
-
     BOT_APP = app
     upload_queue = load_json(QUEUE_FILE, [])
-
     app.create_task(auto_retry_engine())
-
-    logging.info("✅ Background engine started")
+    print("✅ Background engine started")
 
 
 # ==========================================================
-# MAIN
+# MAIN (WEBHOOK MODE)
 # ==========================================================
 def main():
-    if not TELEGRAM_TOKEN:
-        raise Exception("TELEGRAM_TOKEN tidak ditemukan")
 
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
@@ -356,8 +349,13 @@ def main():
 
     app.post_init = on_startup
 
-    logging.info("🚀 AUTO SCALING SHORTS MACHINE RUNNING")
-    app.run_polling(drop_pending_updates=True)
+    print("🚀 WEBHOOK MODE ACTIVE")
+
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        webhook_url=f"{BASE_URL}/{TELEGRAM_TOKEN}",
+    )
 
 
 if __name__ == "__main__":
