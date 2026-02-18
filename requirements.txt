@@ -3,3 +3,6 @@ httpx
 google-api-python-client
 google-auth
 google-auth-oauthlib
+opencv-python-headless
+Pillow
+numpy
