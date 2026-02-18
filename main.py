@@ -355,14 +355,18 @@ def main():
     app.post_init = on_startup
 
     print("🚀 WEBHOOK MODE ACTIVE")
-
+    
     app.run_webhook(
-        listen="0.0.0.0",
-        port=PORT,
-        webhook_url=f"{BASE_URL}/{TELEGRAM_TOKEN}",
-    )
+    listen="0.0.0.0",
+    port=PORT,
+    url_path=TELEGRAM_TOKEN,
+    webhook_url=f"{BASE_URL}/{TELEGRAM_TOKEN}",
+    drop_pending_updates=True,
+)
+
 
 
 if __name__ == "__main__":
     main()
+
 
