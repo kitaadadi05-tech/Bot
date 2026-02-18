@@ -170,14 +170,20 @@ Return JSON.
         r = await client.post(
             "https://openrouter.ai/api/v1/chat/completions",
             headers=headers,
-            json=payload)
+            json=payload
+        )
 
     content = r.json()["choices"][0]["message"]["content"]
     content = re.sub(r"```json|```", "", content)
 
-        try:
-        data = json.loads(re.search(r"\{.*\}", content, re.DOTALL).group())
-        best_title = max(data.get("titles", ["Amazing Viral Short 2026"]), key=trend_score)
+    try:
+        match = re.search(r"\{.*\}", content, re.DOTALL)
+        data = json.loads(match.group()) if match else {}
+
+        best_title = max(
+            data.get("titles", ["Amazing Viral Short 2026"]),
+            key=trend_score
+        )
 
         description = data.get("description", "#shorts Viral Content 2026")
         hashtags = data.get("hashtags", ["shorts", "viral", "trend"])
@@ -192,7 +198,6 @@ Return JSON.
         "description": description,
         "hashtags": hashtags
     }
-
 
 # ==========================================================
 # YOUTUBE AUTH
