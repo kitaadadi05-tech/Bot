@@ -389,7 +389,14 @@ async def progress_updater(percent, eta):
         # =========================
         # STEP 5 — UPLOAD
         # =========================
-        url = await upload_video(temp_path, metadata)
+        url = await upload_video(
+        temp_path,
+        metadata,
+        lambda p, e: asyncio.run_coroutine_threadsafe(
+            progress_updater(p,e),
+            asyncio.get_event_loop()
+        )
+    )
 
         total_time = round(time.time() - start_time, 2)
 
@@ -496,6 +503,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
