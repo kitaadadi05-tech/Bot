@@ -206,6 +206,10 @@ Return JSON.
 # ==========================================================
 # YOUTUBE AUTH
 # ==========================================================
+# ==========================================================
+# YOUTUBE AUTH
+# ==========================================================
+
 def get_youtube_service():
     creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
 
@@ -305,8 +309,12 @@ def detect_shadowban():
 
     last_day = analytics[-1]
 
-    views = last_day[0]
-    impressions = last_day[3]
+    try:
+    views = float(last_day[0])
+    impressions = float(last_day[3])
+    except:
+        return False
+
 
     if impressions > 0 and views < impressions * 0.005:
         return True
@@ -455,7 +463,7 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         # STEP 1 — DOWNLOAD
-        await progress_msg.edit_text("📥 Step 1/4\nDownloading video...")
+    await progress_msg.edit_text("📥 Step 1/4\nDownloading video...")
 
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
             temp_path = tmp.name
@@ -464,7 +472,7 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await file.download_to_drive(temp_path)
 
         # STEP 2 — METADATA
-        await progress_msg.edit_text("🧠 Step 2/4\nGenerating AI Metadata...")
+    await progress_msg.edit_text("🧠 Step 2/4\nGenerating AI Metadata...")
 
         metadata = await generate_metadata(caption)
         metadata["category"] = detect_category(caption)
@@ -582,6 +590,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
