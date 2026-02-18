@@ -46,6 +46,7 @@ logging.basicConfig(level=logging.INFO)
 
 upload_queue = []
 BOT_APP = None
+MAIN_LOOP = None
 
 
 # ==========================================================
@@ -203,8 +204,21 @@ def get_youtube_service():
     return build("youtube", "v3", credentials=creds)
 
 
-async def upload_video(path, metadata, progress_callback=None):
+async def upload_video(path, metadata, progress_message):
+
     loop = asyncio.get_running_loop()
+
+    def progress_callback(percent, eta):
+        if MAIN_LOOP:
+            asyncio.run_coroutine_threadsafe(
+                progress_message.edit_text(
+                    f"🚀 Uploading to YouTube...\n\n"
+                    f"Progress: {percent}%\n"
+                    f"ETA: {eta}s"
+                ),
+                MAIN_LOOP
+            )
+
     return await loop.run_in_executor(
         None,
         _upload_sync,
@@ -213,22 +227,6 @@ async def upload_video(path, metadata, progress_callback=None):
         progress_callback
     )
 
-youtube.commentThreads().insert(
-    part="snippet",
-    body={
-        "snippet": {
-            "videoId": video_id,
-            "topLevelComment": {
-                "snippet": {
-                    "textOriginal": pinned_comment
-                }
-            }
-        }
-    }
-).execute()
-
-def queue_position():
-    return len(upload_queue) + 1
 
 def _upload_sync(path, metadata, progress_callback=None):
 
@@ -254,22 +252,21 @@ def _upload_sync(path, metadata, progress_callback=None):
 
     response = None
     start_time = time.time()
+    total = os.path.getsize(path)
 
     while response is None:
         status, response = request.next_chunk()
 
         if status and progress_callback:
             uploaded = status.resumable_progress
-            total = os.path.getsize(path)
             percent = int(uploaded / total * 100)
 
             speed = uploaded / (time.time() - start_time + 0.1)
-            remaining = (total - uploaded) / (speed + 1)
+            eta = (total - uploaded) / (speed + 1)
 
-            progress_callback(percent, round(remaining,1))
+            progress_callback(percent, round(eta, 1))
 
     return f"https://youtube.com/watch?v={response['id']}"
-
 
 def detect_category(keyword):
 
@@ -318,12 +315,6 @@ async def auto_retry_engine():
 # HANDLER
 # ==========================================================
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-async def progress_updater(percent, eta):
-    await progress_msg.edit_text(
-        f"🚀 Uploading...\n\n"
-        f"Progress: {percent}%\n"
-        f"ETA: {eta}s"
-    )
 
     if not update.message or not update.message.video:
         return
@@ -335,10 +326,8 @@ async def progress_updater(percent, eta):
     progress_msg = await update.message.reply_text("🚀 Processing your Short...\n")
 
     try:
-        # =========================
         # STEP 1 — DOWNLOAD
-        # =========================
-        await progress_msg.edit_text("📥 Step 1/5\nDownloading video...")
+        await progress_msg.edit_text("📥 Step 1/4\nDownloading video...")
 
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
             temp_path = tmp.name
@@ -346,78 +335,38 @@ async def progress_updater(percent, eta):
         file = await context.bot.get_file(video.file_id)
         await file.download_to_drive(temp_path)
 
-        await progress_msg.edit_text("✅ Step 1/5 Completed\n\n🧠 Step 2/5\nAnalyzing trend...")
+        # STEP 2 — METADATA
+        await progress_msg.edit_text("🧠 Step 2/4\nGenerating AI Metadata...")
 
-        # =========================
-        # STEP 2 — TREND ANALYSIS
-        # =========================
-        trend_value = trend_score(caption)
-        await asyncio.sleep(1)
-
-        await progress_msg.edit_text(
-            f"📈 Trend Score: {trend_value}/15\n\n"
-            "🧠 Step 3/5\nGenerating AI Metadata..."
-        )
-
-        # =========================
-        # STEP 3 — METADATA
-        # =========================
         metadata = await generate_metadata(caption)
         metadata["category"] = detect_category(caption)
 
+        trend_value = trend_score(metadata["title"])
+        risk_score = monetization_risk_score(metadata["title"])
+
+        # STEP 3 — READY TO UPLOAD
         await progress_msg.edit_text(
-            f"🏷 Title Selected:\n{metadata['title'][:60]}...\n\n"
-            "🖼 Step 4/5\nGenerating Thumbnail..."
+            f"🏷 Title: {metadata['title'][:60]}...\n"
+            f"📈 Trend Score: {trend_value}\n"
+            f"💰 Monetization Risk: {risk_score}%\n\n"
+            "🚀 Step 3/4\nPreparing upload..."
         )
 
-        # =========================
-        # STEP 4 — THUMBNAIL
-        # =========================
-        thumb_path = generate_thumbnail(temp_path, metadata["title"])
-
-        if thumb_path:
-            await update.message.reply_photo(
-                photo=open(thumb_path, "rb"),
-                caption="🖼 Thumbnail Preview"
-            )
-
-        await progress_msg.edit_text(
-            "🚀 Step 5/5\nUploading to YouTube...\n\n"
-            "⏳ Please wait..."
-        )
-
-        # =========================
-        # STEP 5 — UPLOAD
-        # =========================
-        url = await upload_video(
-        temp_path,
-        metadata,
-        lambda p, e: asyncio.run_coroutine_threadsafe(
-            progress_updater(p,e),
-            asyncio.get_event_loop()
-        )
-    )
+        # STEP 4 — UPLOAD WITH LIVE PROGRESS
+        url = await upload_video(temp_path, metadata, progress_msg)
 
         total_time = round(time.time() - start_time, 2)
 
         await progress_msg.edit_text(
             "🎉 UPLOAD SUCCESS 🎉\n\n"
             f"🔗 {url}\n\n"
-            f"⏱ Process Time: {total_time}s\n"
-            f"🔥 Trend Score: {trend_value}"
+            f"⏱ Time: {total_time}s\n"
+            f"🔥 Trend Score: {trend_value}\n"
+            f"💰 Risk: {risk_score}%"
         )
 
         update_stats(True)
-
-        if ADMIN_CHAT_ID:
-            await context.bot.send_message(
-                ADMIN_CHAT_ID,
-                f"✅ Upload Success\n{url}\nTime: {total_time}s"
-            )
-
         os.remove(temp_path)
-        if thumb_path:
-            os.remove(thumb_path)
 
     except Exception as e:
 
@@ -433,15 +382,9 @@ async def progress_updater(percent, eta):
 
         await progress_msg.edit_text(
             "⚠️ Upload Failed\n"
-            "Added to Smart Retry Queue.\n\n"
+            "Added to Retry Queue.\n\n"
             f"Error: {str(e)[:100]}"
         )
-
-        if ADMIN_CHAT_ID:
-            await context.bot.send_message(
-                ADMIN_CHAT_ID,
-                f"❌ Upload Failed\nError: {str(e)}"
-            )
 
 # ==========================================================
 # ADMIN COMMAND
@@ -491,6 +434,8 @@ def main():
     app.post_init = on_startup
 
     print("🚀 WEBHOOK MODE ACTIVE")
+    global MAIN_LOOP
+    MAIN_LOOP = asyncio.get_event_loop()
 
     app.run_webhook(
         listen="0.0.0.0",
@@ -503,6 +448,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
