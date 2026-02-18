@@ -102,6 +102,25 @@ def monetization_safe(text):
             return False
     return True
 
+def monetization_risk_score(text):
+
+    score = 0
+    for word in BANNED_WORDS:
+        if word in text.lower():
+            score += 15
+
+    return min(score, 100)
+
+def generate_pinned_comment(title):
+
+    templates = [
+        f"🔥 What do you think about '{title}'?",
+        "💬 Drop your opinion below!",
+        "🚀 Would you try this?",
+        "👇 Comment YES if you agree!"
+    ]
+
+    return random.choice(templates)
 
 # ==========================================================
 # TREND SCORE
@@ -184,12 +203,35 @@ def get_youtube_service():
     return build("youtube", "v3", credentials=creds)
 
 
-async def upload_video(path, metadata):
+async def upload_video(path, metadata, progress_callback=None):
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, _upload_sync, path, metadata)
+    return await loop.run_in_executor(
+        None,
+        _upload_sync,
+        path,
+        metadata,
+        progress_callback
+    )
 
+youtube.commentThreads().insert(
+    part="snippet",
+    body={
+        "snippet": {
+            "videoId": video_id,
+            "topLevelComment": {
+                "snippet": {
+                    "textOriginal": pinned_comment
+                }
+            }
+        }
+    }
+).execute()
 
-def _upload_sync(path, metadata):
+def queue_position():
+    return len(upload_queue) + 1
+
+def _upload_sync(path, metadata, progress_callback=None):
+
     youtube = get_youtube_service()
 
     body = {
@@ -197,12 +239,12 @@ def _upload_sync(path, metadata):
             "title": metadata["title"],
             "description": metadata["description"],
             "tags": metadata["hashtags"],
-            "categoryId": "22"
+            "categoryId": metadata.get("category", "22")
         },
         "status": {"privacyStatus": "public"}
     }
 
-    media = MediaFileUpload(path, resumable=True)
+    media = MediaFileUpload(path, chunksize=1024*1024, resumable=True)
 
     request = youtube.videos().insert(
         part="snippet,status",
@@ -210,9 +252,37 @@ def _upload_sync(path, metadata):
         media_body=media
     )
 
-    response = request.execute()
+    response = None
+    start_time = time.time()
+
+    while response is None:
+        status, response = request.next_chunk()
+
+        if status and progress_callback:
+            uploaded = status.resumable_progress
+            total = os.path.getsize(path)
+            percent = int(uploaded / total * 100)
+
+            speed = uploaded / (time.time() - start_time + 0.1)
+            remaining = (total - uploaded) / (speed + 1)
+
+            progress_callback(percent, round(remaining,1))
+
     return f"https://youtube.com/watch?v={response['id']}"
 
+
+def detect_category(keyword):
+
+    keyword = keyword.lower()
+
+    if any(x in keyword for x in ["game","minecraft","pubg"]):
+        return "20"
+    if any(x in keyword for x in ["tech","ai","robot"]):
+        return "28"
+    if any(x in keyword for x in ["learn","how","tutorial"]):
+        return "27"
+
+    return "24"
 
 # ==========================================================
 # AUTO RETRY ENGINE
@@ -248,6 +318,12 @@ async def auto_retry_engine():
 # HANDLER
 # ==========================================================
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def progress_updater(percent, eta):
+    await progress_msg.edit_text(
+        f"🚀 Uploading...\n\n"
+        f"Progress: {percent}%\n"
+        f"ETA: {eta}s"
+    )
 
     if not update.message or not update.message.video:
         return
@@ -287,6 +363,7 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # STEP 3 — METADATA
         # =========================
         metadata = await generate_metadata(caption)
+        metadata["category"] = detect_category(caption)
 
         await progress_msg.edit_text(
             f"🏷 Title Selected:\n{metadata['title'][:60]}...\n\n"
@@ -419,5 +496,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
