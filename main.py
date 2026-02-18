@@ -40,13 +40,11 @@ SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
 TOKEN_FILE = "token.json"
 
 QUEUE_FILE = "queue.json"
-LIMIT_FILE = "limit.json"
 STATS_FILE = "stats.json"
 
 logging.basicConfig(level=logging.INFO)
 
 upload_queue = []
-upload_limit_reached = False
 BOT_APP = None
 
 
@@ -96,10 +94,7 @@ def update_stats(success=True):
 # ==========================================================
 # MONETIZATION SAFE FILTER
 # ==========================================================
-BANNED_WORDS = [
-    "kill", "blood", "sex", "nude", "weapon",
-    "fight", "drug", "suicide", "hate"
-]
+BANNED_WORDS = ["kill", "blood", "sex", "nude", "weapon", "drug"]
 
 def monetization_safe(text):
     for word in BANNED_WORDS:
@@ -109,25 +104,20 @@ def monetization_safe(text):
 
 
 # ==========================================================
-# AI TREND ANALYZER
+# TREND SCORE
 # ==========================================================
-def trend_score(keyword):
-    trend_words = [
-        "2026", "viral", "ai", "secret",
-        "new", "trend", "insane", "hack"
-    ]
-
+def trend_score(title):
+    trend_words = ["2026", "viral", "ai", "secret", "new", "trend"]
     score = 0
     for w in trend_words:
-        if w in keyword.lower():
+        if w in title.lower():
             score += 5
-
     score += random.randint(1, 5)
     return score
 
 
 # ==========================================================
-# AI METADATA GENERATOR
+# METADATA AI
 # ==========================================================
 async def generate_metadata(keyword):
 
@@ -142,7 +132,7 @@ Generate:
 
 Topic: {keyword}
 
-Return JSON format.
+Return JSON.
 """
 
     headers = {
@@ -164,9 +154,16 @@ Return JSON format.
 
     content = r.json()["choices"][0]["message"]["content"]
     content = re.sub(r"```json|```", "", content)
-    data = json.loads(re.search(r"\{.*\}", content, re.DOTALL).group())
 
-    best_title = max(data["titles"], key=trend_score)
+    try:
+        data = json.loads(re.search(r"\{.*\}", content, re.DOTALL).group())
+        best_title = max(data["titles"], key=trend_score)
+    except:
+        return {
+            "title": "Amazing Viral Short 2026",
+            "description": "#shorts Amazing Viral Content",
+            "hashtags": ["shorts", "viral", "trend"]
+        }
 
     return {
         "title": best_title[:90],
@@ -176,38 +173,7 @@ Return JSON format.
 
 
 # ==========================================================
-# THUMBNAIL SELECTOR
-# ==========================================================
-def generate_thumbnail(video_path, text):
-
-    cap = cv2.VideoCapture(video_path)
-    frames = []
-
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-        frames.append(frame)
-
-    cap.release()
-
-    if not frames:
-        return None
-
-    best_frame = max(frames, key=lambda f: np.mean(cv2.cvtColor(f, cv2.COLOR_BGR2GRAY)))
-
-    img = Image.fromarray(cv2.cvtColor(best_frame, cv2.COLOR_BGR2RGB))
-    draw = ImageDraw.Draw(img)
-    draw.text((50, 50), text[:25], fill="yellow")
-
-    thumb_path = video_path.replace(".mp4", "_thumb.jpg")
-    img.save(thumb_path)
-
-    return thumb_path
-
-
-# ==========================================================
-# YOUTUBE UPLOAD
+# YOUTUBE AUTH
 # ==========================================================
 def get_youtube_service():
     creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
@@ -224,7 +190,6 @@ async def upload_video(path, metadata):
 
 
 def _upload_sync(path, metadata):
-
     youtube = get_youtube_service()
 
     body = {
@@ -253,10 +218,8 @@ def _upload_sync(path, metadata):
 # AUTO RETRY ENGINE
 # ==========================================================
 async def auto_retry_engine():
-    global upload_limit_reached
-
     while True:
-        await asyncio.sleep(900)
+        await asyncio.sleep(600)
 
         if not upload_queue:
             continue
@@ -266,6 +229,7 @@ async def auto_retry_engine():
         try:
             url = await upload_video(item["file"], item["meta"])
             update_stats(True)
+            os.remove(item["file"])
 
             if ADMIN_CHAT_ID:
                 await BOT_APP.bot.send_message(
@@ -273,9 +237,7 @@ async def auto_retry_engine():
                     f"✅ Auto Retry Success\n{url}"
                 )
 
-            os.remove(item["file"])
-
-        except Exception:
+        except Exception as e:
             upload_queue.append(item)
             update_stats(False)
 
@@ -287,12 +249,20 @@ async def auto_retry_engine():
 # ==========================================================
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
+    if not update.message or not update.message.video:
+        return
+
+    print("📩 VIDEO RECEIVED")
+
     video = update.message.video
     caption = update.message.caption or "Viral Short 2026"
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
         temp_path = tmp.name
-        await context.bot.get_file(video.file_id).download_to_drive(temp_path)
+
+    # ✅ FIXED ASYNC BUG HERE
+    file = await context.bot.get_file(video.file_id)
+    await file.download_to_drive(temp_path)
 
     metadata = await generate_metadata(caption)
 
@@ -302,7 +272,7 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         update_stats(True)
         os.remove(temp_path)
 
-    except Exception:
+    except Exception as e:
         upload_queue.append({"file": temp_path, "meta": metadata})
         save_json(QUEUE_FILE, upload_queue)
         update_stats(False)
@@ -311,10 +281,9 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ==========================================================
-# ADMIN STATS
+# ADMIN COMMAND
 # ==========================================================
 async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
     stats = load_json(STATS_FILE, {})
     queue_len = len(upload_queue)
 
@@ -327,19 +296,22 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ==========================================================
-# STARTUP TASK
+# ERROR HANDLER
+# ==========================================================
+async def error_handler(update, context):
+    logging.error(f"Exception: {context.error}")
+
+
+# ==========================================================
+# STARTUP
 # ==========================================================
 async def on_startup(app):
     global BOT_APP, upload_queue
     BOT_APP = app
     upload_queue = load_json(QUEUE_FILE, [])
 
-    async def delayed_start():
-        await asyncio.sleep(2)
-        asyncio.create_task(auto_retry_engine())
-        print("✅ Background engine started")
-
-    asyncio.create_task(delayed_start())
+    asyncio.create_task(auto_retry_engine())
+    print("✅ Background engine started")
 
 
 # ==========================================================
@@ -351,22 +323,20 @@ def main():
 
     app.add_handler(MessageHandler(filters.VIDEO, handle_video))
     app.add_handler(CommandHandler("stats", stats_cmd))
+    app.add_error_handler(error_handler)
 
     app.post_init = on_startup
 
     print("🚀 WEBHOOK MODE ACTIVE")
-    
-    app.run_webhook(
-    listen="0.0.0.0",
-    port=PORT,
-    url_path=TELEGRAM_TOKEN,
-    webhook_url=f"{BASE_URL}/{TELEGRAM_TOKEN}",
-    drop_pending_updates=True,
-)
 
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        url_path=TELEGRAM_TOKEN,
+        webhook_url=f"{BASE_URL}/{TELEGRAM_TOKEN}",
+        drop_pending_updates=True,
+    )
 
 
 if __name__ == "__main__":
     main()
-
-
