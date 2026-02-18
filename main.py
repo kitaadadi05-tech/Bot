@@ -35,12 +35,16 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
 BASE_URL = os.getenv("BASE_URL")
 PORT = int(os.getenv("PORT", 8080))
+SCOPES = [
+    "https://www.googleapis.com/auth/youtube.upload",
+    "https://www.googleapis.com/auth/yt-analytics.readonly"
+]
 
-SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
 TOKEN_FILE = "token.json"
-
 QUEUE_FILE = "queue.json"
 STATS_FILE = "stats.json"
+ANALYTICS_FILE = "analytics.json"
+PERFORMANCE_FILE = "performance.json"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -204,12 +208,126 @@ Return JSON.
 # ==========================================================
 def get_youtube_service():
     creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
+
     if creds.expired and creds.refresh_token:
         creds.refresh(Request())
         with open(TOKEN_FILE, "w") as token:
             token.write(creds.to_json())
+
     return build("youtube", "v3", credentials=creds)
 
+
+def get_analytics_service():
+    creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
+    return build("youtubeAnalytics", "v2", credentials=creds)
+
+def fetch_channel_analytics():
+
+    analytics = get_analytics_service()
+
+    end_date = time.strftime("%Y-%m-%d")
+    start_date = time.strftime("%Y-%m-%d", time.localtime(time.time()-7*86400))
+
+    response = analytics.reports().query(
+        ids="channel==MINE",
+        startDate=start_date,
+        endDate=end_date,
+        metrics="views,estimatedMinutesWatched,averageViewDuration,impressions,impressionCtr",
+        dimensions="day"
+    ).execute()
+
+    rows = response.get("rows", [])
+
+    save_json(ANALYTICS_FILE, rows)
+    return rows
+
+def title_performance_score(title):
+
+    score = 0
+
+    if len(title) < 60:
+        score += 10
+
+    if any(x in title.lower() for x in ["how","secret","ai","new"]):
+        score += 15
+
+    score += trend_score(title)
+
+    ctr_est = predict_ctr(title)
+    score += ctr_est
+
+    return round(score, 2)
+
+def get_best_hour_from_analytics():
+
+    analytics = get_analytics_service()
+
+    end_date = time.strftime("%Y-%m-%d")
+    start_date = time.strftime("%Y-%m-%d", time.localtime(time.time()-14*86400))
+
+    response = analytics.reports().query(
+        ids="channel==MINE",
+        startDate=start_date,
+        endDate=end_date,
+        metrics="impressionCtr",
+        dimensions="hour"
+    ).execute()
+
+    rows = response.get("rows", [])
+
+    if not rows:
+        return random.choice([11,13,16,19,21])
+
+    best = max(rows, key=lambda x: x[1])
+
+    return int(best[0])
+def smart_best_hour():
+
+    weekday = time.localtime().tm_wday  # 0=Mon
+
+    if weekday >= 5:
+        base_hours = [10,12,15,18,20]
+    else:
+        base_hours = [11,13,16,19,21]
+
+    try:
+        analytics_hour = get_best_hour_from_analytics()
+        return analytics_hour
+    except:
+        return random.choice(base_hours)
+
+def detect_shadowban():
+
+    analytics = load_json(ANALYTICS_FILE, [])
+
+    if not analytics:
+        return False
+
+    last_day = analytics[-1]
+
+    views = last_day[0]
+    impressions = last_day[3]
+
+    if impressions > 0 and views < impressions * 0.005:
+        return True
+
+    return False
+
+def predict_ctr(title):
+
+    base_score = trend_score(title)
+
+    analytics = load_json(ANALYTICS_FILE, [])
+    avg_ctr = 5
+
+    if analytics:
+        ctr_values = [row[4] for row in analytics if len(row) > 4]
+        if ctr_values:
+            avg_ctr = sum(ctr_values) / len(ctr_values)
+
+    prediction = avg_ctr + (base_score * 0.3)
+
+    return round(min(prediction, 25), 2)
 
 async def upload_video(path, metadata, progress_message):
 
@@ -295,6 +413,9 @@ async def auto_retry_engine():
     while True:
         await asyncio.sleep(600)
 
+        if random.randint(1,10) == 5:
+            fetch_channel_analytics()
+
         if not upload_queue:
             continue
 
@@ -347,17 +468,23 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         metadata = await generate_metadata(caption)
         metadata["category"] = detect_category(caption)
-
+        ctr_prediction = predict_ctr(metadata["title"])
+        performance_score = title_performance_score(metadata["title"])
+        shadow_flag = detect_shadowban()
         trend_value = trend_score(metadata["title"])
         risk_score = monetization_risk_score(metadata["title"])
 
         # STEP 3 — READY TO UPLOAD
-        await progress_msg.edit_text(
+       await progress_msg.edit_text(
             f"🏷 Title: {metadata['title'][:60]}...\n"
             f"📈 Trend Score: {trend_value}\n"
-            f"💰 Monetization Risk: {risk_score}%\n\n"
-            "🚀 Step 3/4\nPreparing upload..."
+            f"🎯 Predicted CTR: {ctr_prediction}%\n"
+            f"🏆 Title Score: {performance_score}\n"
+            f"💰 Monetization Risk: {risk_score}%\n"
+            f"🚨 Shadow Risk: {'YES' if shadow_flag else 'NO'}\n\n"
+            "🚀 Uploading..."
         )
+
 
         # STEP 4 — UPLOAD WITH LIVE PROGRESS
         url = await upload_video(temp_path, metadata, progress_msg)
@@ -455,6 +582,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
