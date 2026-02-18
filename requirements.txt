@@ -6,4 +6,4 @@ google-auth-oauthlib
 opencv-python-headless
 Pillow
 numpy
-python-3.11.9
+
