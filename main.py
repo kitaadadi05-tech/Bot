@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 import pytz
 import random
 from telegram import Update
-from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filters
+from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filters, CallbackQueryHandler, CommandHandler
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
@@ -125,18 +125,27 @@ def get_next_prime_time():
 # Start UI
 #============================================================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [[
-        InlineKeyboardButton("📅 Scheduled Videos", callback_data="list")
-    ], [InlineKeyboardButton("🚀 Upload Guide", callback_data="help")]]
+    stats = get_dashboard_stats()
 
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    next_text = "Tidak ada"
+    if stats["next_publish"]:
+        next_text = stats["next_publish"].strftime("%d %b %Y - %H:%M WIB")
+
+    text = ("🚀 *YouTube Shorts Automation PRO*\n\n"
+            f"📊 Scheduled: {stats['total']}\n"
+            f"🕒 Next Publish: {next_text}\n"
+            f"🔥 Slot Today: {stats['today_slots']}/3\n\n"
+            "Kelola video di bawah 👇")
+
+    keyboard = [[
+        InlineKeyboardButton("📅 Manage Videos", callback_data="list")
+    ], [InlineKeyboardButton("📤 Upload Guide", callback_data="help")],
+                [InlineKeyboardButton("🔄 Refresh", callback_data="dashboard")]]
 
     await update.message.reply_text(
-        "🚀 *YouTube Shorts Automation Bot*\n\n"
-        "Upload video (<60 detik) untuk auto schedule.\n"
-        "Gunakan tombol di bawah 👇",
+        text,
         parse_mode="Markdown",
-        reply_markup=reply_markup)
+        reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 #==========================================================
@@ -165,6 +174,31 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                       "2️⃣ Bot auto schedule\n"
                                       "3️⃣ Kelola via tombol\n\n"
                                       "Jam publish: 12, 17, 20 WIB")
+
+    elif data == "dashboard":
+
+        stats = get_dashboard_stats()
+
+        next_text = "Tidak ada"
+        if stats["next_publish"]:
+            next_text = stats["next_publish"].strftime("%d %b %Y - %H:%M WIB")
+
+        text = ("🚀 *YouTube Shorts Automation PRO*\n\n"
+                f"📊 Scheduled: {stats['total']}\n"
+                f"🕒 Next Publish: {next_text}\n"
+                f"🔥 Slot Today: {stats['today_slots']}/3\n\n"
+                "Kelola video di bawah 👇")
+
+        keyboard = [
+            [InlineKeyboardButton("📅 Manage Videos", callback_data="list")],
+            [InlineKeyboardButton("📤 Upload Guide", callback_data="help")],
+            [InlineKeyboardButton("🔄 Refresh", callback_data="dashboard")]
+        ]
+
+        await query.edit_message_text(
+            text,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 #==========================================================
@@ -215,15 +249,21 @@ async def publish_from_button(query, index):
         await query.answer("Invalid index")
         return
 
-    video = data[index]
+    youtube = get_youtube_service()
+    video_id = data[index]["video_id"]
 
-    # panggil fungsi publish asli kamu di sini
-    publish_now(video)
+    youtube.videos().update(part="status",
+                            body={
+                                "id": video_id,
+                                "status": {
+                                    "privacyStatus": "public"
+                                }
+                            }).execute()
 
     data.pop(index)
     save_publish_list(data)
 
-    await query.answer("Video dipublish!")
+    await query.answer("✅ Video dipublish!")
     await show_list(query)
 
 
@@ -448,6 +488,19 @@ async def upload_to_youtube(path, metadata):
 def _upload_sync(path, metadata):
     publish_time = get_next_prime_time()
     youtube = get_youtube_service()
+    publish_list = load_publish_list()
+
+    today = datetime.now(pytz.timezone("Asia/Jakarta")).date()
+
+    today_count = 0
+    for item in publish_list:
+        publish_time = datetime.fromisoformat(item["publishAt"]).astimezone(
+            pytz.timezone("Asia/Jakarta"))
+        if publish_time.date() == today:
+            today_count += 1
+
+    if today_count >= 3:
+        raise Exception("Daily prime slot penuh (3/hari)")
 
     body = {
         "snippet": {
@@ -581,37 +634,51 @@ async def retry_worker():
 # ==========================================================
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global upload_limit_reached
+
     message = update.message
     video = message.video
+
     if not video:
         return
+
     if video.duration > 60:
         await message.reply_text("❌ Max 60 seconds.")
         return
+
     caption = message.caption or "Amazing Short"
-    await message.reply_text("⬇️ Downloading...")
+
+    status_msg = await message.reply_text("⬇️ Downloading...")
+
     file = await context.bot.get_file(video.file_id)
+
     with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
         temp_path = tmp.name
         await file.download_to_drive(temp_path)
-    await message.reply_text("🤖 Generating metadata...")
+
+    await status_msg.edit_text("🤖 Generating metadata...")
+
     metadata = await generate_viral_metadata(caption)
-    await message.reply_text("🚀 Uploading...")
+
+    await status_msg.edit_text("🚀 Uploading to YouTube...")
+
     try:
         url = await upload_to_youtube(temp_path, metadata)
-        await message.reply_text(f"✅ Uploaded!\n{url}")
+
+        await status_msg.edit_text(f"✅ Uploaded & Scheduled!\n{url}")
+
         os.remove(temp_path)
+
     except HttpError as e:
         if "uploadLimitExceeded" in str(e):
             upload_limit_reached = True
             save_limit_time()
             upload_queue.append({"file_path": temp_path, "metadata": metadata})
             save_queue(upload_queue)
-            await message.reply_text(
-                "⚠️ Daily limit reached.\nVideo masuk queue auto retry 24 jam."
-            )
+
+            await status_msg.edit_text(
+                "⚠️ Daily limit reached.\nMasuk queue auto retry 24 jam.")
         else:
-            await message.reply_text(f"❌ YouTube Error: {e}")
+            await status_msg.edit_text(f"❌ YouTube Error:\n{e}")
             os.remove(temp_path)
 
 
@@ -628,29 +695,73 @@ async def on_startup(app):
 
 
 # ==========================================================
+# CLEANUP PUBLISHED VIDEOS
+# ==========================================================
+def get_dashboard_stats():
+    cleanup_published()
+    data = load_publish_list()
+
+    total = len(data)
+
+    tz = pytz.timezone("Asia/Jakarta")
+    now = datetime.now(tz)
+
+    today_slots = 0
+    next_publish = None
+
+    for item in data:
+        publish_time = datetime.fromisoformat(item["publishAt"]).astimezone(tz)
+
+        if publish_time.date() == now.date():
+            today_slots += 1
+
+        if not next_publish or publish_time < next_publish:
+            next_publish = publish_time
+
+    return {
+        "total": total,
+        "today_slots": today_slots,
+        "next_publish": next_publish
+    }
+
+
+# ==========================================================
 # ERROR HANDLER
 # ==========================================================
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     import traceback
-    print("Error:", traceback.format_exc())
+    error_text = traceback.format_exc()
+    print("Error:", error_text)
+
+    if ADMIN_CHAT_ID and BOT_APP:
+        await BOT_APP.bot.send_message(chat_id=ADMIN_CHAT_ID,
+                                       text="⚠️ BOT ERROR:\n" +
+                                       error_text[:1000])
 
 
 # ==========================================================
 # MAIN
 # ==========================================================
 def main():
-    from telegram.ext import CommandHandler
-
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(MessageHandler(filters.VIDEO, handle_video))
-    app.add_error_handler(error_handler)
-    app.post_init = on_startup
+
+    # Commands dulu
+    app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("list", list_videos))
     app.add_handler(CommandHandler("publish", publish_video))
     app.add_handler(CommandHandler("delete", delete_video))
-    app.add_handler(CommandHandler("start", start))
+
+    # Callback button handler
     app.add_handler(CallbackQueryHandler(button_handler))
-    app.run_polling(drop_pending_updates=True)
+
+    # Message handler terakhir
+    app.add_handler(MessageHandler(filters.VIDEO, handle_video))
+
+    app.add_error_handler(error_handler)
+    app.post_init = on_startup
+
+    app.run_polling(drop_pending_updates=True,
+                    allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
