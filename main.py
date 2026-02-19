@@ -6,595 +6,652 @@ import tempfile
 import httpx
 import time
 import re
+from datetime import datetime, timedelta
+import pytz
 import random
-import cv2
-import numpy as np
-from PIL import Image, ImageDraw
-
 from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder,
-    MessageHandler,
-    CommandHandler,
-    ContextTypes,
-    filters,
-)
-
+from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filters
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
+from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from googleapiclient.errors import HttpError
 
-
 # ==========================================================
-# ENV
+# CONFIG
 # ==========================================================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
-BASE_URL = os.getenv("BASE_URL")
-PORT = int(os.getenv("PORT", 8080))
-SCOPES = [
-    "https://www.googleapis.com/auth/youtube.upload",
-    "https://www.googleapis.com/auth/yt-analytics.readonly"
-]
+ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")  # isi dengan chat id kamu
+
+QUEUE_FILE = "queue.json"
+LIMIT_FILE = "limit.json"
+PUBLISH_FILE = "publish_list.json"
+
+SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
 
 TOKEN_FILE = "token.json"
-QUEUE_FILE = "queue.json"
-STATS_FILE = "stats.json"
-ANALYTICS_FILE = "analytics.json"
-PERFORMANCE_FILE = "performance.json"
+CREDENTIALS_FILE = "credential10.json"
 
 logging.basicConfig(level=logging.INFO)
 
 upload_queue = []
+upload_limit_reached = False
 BOT_APP = None
-MAIN_LOOP = None
 
 
 # ==========================================================
-# JSON SAFE
+# QUEUE SYSTEM
 # ==========================================================
-def load_json(path, default):
-    if os.path.exists(path):
-        with open(path, "r") as f:
+def load_queue():
+    if os.path.exists(QUEUE_FILE):
+        with open(QUEUE_FILE, "r") as f:
             return json.load(f)
-    return default
+    return []
 
 
-def save_json(path, data):
-    with open(path, "w") as f:
-        json.dump(data, f)
+def save_queue(queue):
+    with open(QUEUE_FILE, "w") as f:
+        json.dump(queue, f)
+
+
+def save_limit_time():
+    with open(LIMIT_FILE, "w") as f:
+        json.dump({"time": time.time()}, f)
+
+
+def can_retry():
+    if not os.path.exists(LIMIT_FILE):
+        return True
+    with open(LIMIT_FILE, "r") as f:
+        data = json.load(f)
+    return time.time() - data["time"] > 86400  # 24 jam
+
+
+#============================================================
+def load_publish_list():
+    if os.path.exists(PUBLISH_FILE):
+        with open(PUBLISH_FILE, "r") as f:
+            return json.load(f)
+    return []
+
+
+def save_publish_list(data):
+    with open(PUBLISH_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+#============================================================
+# PRIME TIME CHECKER
+
+
+def get_next_prime_time():
+    tz = pytz.timezone("Asia/Jakarta")
+    now = datetime.now(tz)
+
+    prime_hours = [12, 17, 20]
+    publish_list = load_publish_list()
+
+    # ambil semua waktu yang sudah terpakai
+    used_times = set(item["publishAt"] for item in publish_list)
+
+    for day_offset in range(7):  # cek 7 hari ke depan
+        check_day = now + timedelta(days=day_offset)
+
+        for hour in prime_hours:
+            random_minute = random.randint(3, 27)
+
+            candidate = check_day.replace(hour=hour,
+                                          minute=random_minute,
+                                          second=0,
+                                          microsecond=0)
+
+            if candidate <= now:
+                continue
+
+            utc_time = candidate.astimezone(pytz.utc).isoformat()
+
+            if utc_time not in used_times:
+                return utc_time
+
+    # fallback
+    fallback = now + timedelta(days=1)
+    return fallback.astimezone(pytz.utc).isoformat()
+
+
+#============================================================
+# Start UI
+#============================================================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [[
+        InlineKeyboardButton("📅 Scheduled Videos", callback_data="list")
+    ], [InlineKeyboardButton("🚀 Upload Guide", callback_data="help")]]
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await update.message.reply_text(
+        "🚀 *YouTube Shorts Automation Bot*\n\n"
+        "Upload video (<60 detik) untuk auto schedule.\n"
+        "Gunakan tombol di bawah 👇",
+        parse_mode="Markdown",
+        reply_markup=reply_markup)
+
+
+#==========================================================
+# Callback Handler
+#==========================================================
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data
+
+    if data == "list":
+        await show_list(query)
+
+    elif data.startswith("publish_"):
+        index = int(data.split("_")[1])
+        await publish_from_button(query, index)
+
+    elif data.startswith("delete_"):
+        index = int(data.split("_")[1])
+        await delete_from_button(query, index)
+
+    elif data == "help":
+        await query.edit_message_text("📌 Cara Pakai:\n\n"
+                                      "1️⃣ Kirim video Shorts\n"
+                                      "2️⃣ Bot auto schedule\n"
+                                      "3️⃣ Kelola via tombol\n\n"
+                                      "Jam publish: 12, 17, 20 WIB")
+
+
+#==========================================================
+#Modern Sheduled list
+#==========================================================
+async def show_list(query):
+    cleanup_published()
+    data = load_publish_list()
+
+    if not data:
+        await query.edit_message_text("📭 Tidak ada video terjadwal.")
+        return
+
+    text = "📅 *Scheduled Videos:*\n\n"
+    keyboard = []
+
+    for i, item in enumerate(data):
+        title = item["title"]
+        publish_time = datetime.fromisoformat(item["publishAt"])
+        jakarta_time = publish_time.astimezone(pytz.timezone("Asia/Jakarta"))
+
+        text += f"{i+1}. {title}\n"
+        text += f"🕒 {jakarta_time.strftime('%d %b %Y - %H:%M WIB')}\n\n"
+
+        keyboard.append([
+            InlineKeyboardButton(f"🚀 Publish {i+1}",
+                                 callback_data=f"publish_{i}"),
+            InlineKeyboardButton(f"🗑 Delete {i+1}",
+                                 callback_data=f"delete_{i}")
+        ])
+
+    keyboard.append([InlineKeyboardButton("🔄 Refresh", callback_data="list")])
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await query.edit_message_text(text,
+                                  parse_mode="Markdown",
+                                  reply_markup=reply_markup)
+
+
+#==========================================================
+# Publish from button
+#==========================================================
+async def publish_from_button(query, index):
+    data = load_publish_list()
+
+    if index >= len(data):
+        await query.answer("Invalid index")
+        return
+
+    video = data[index]
+
+    # panggil fungsi publish asli kamu di sini
+    publish_now(video)
+
+    data.pop(index)
+    save_publish_list(data)
+
+    await query.answer("Video dipublish!")
+    await show_list(query)
+
+
+#==========================================================
+# Delete from button
+#==========================================================
+async def delete_from_button(query, index):
+    data = load_publish_list()
+
+    if index >= len(data):
+        await query.answer("Invalid index")
+        return
+
+    data.pop(index)
+    save_publish_list(data)
+
+    await query.answer("Video dihapus!")
+    await show_list(query)
 
 
 # ==========================================================
-# DAILY COUNTER
+# CLEANUP PUBLISHED VIDEOS
 # ==========================================================
-def update_stats(success=True):
-    stats = load_json(STATS_FILE, {
-        "today_uploads": 0,
-        "success": 0,
-        "failed": 0,
-        "last_reset": time.time()
-    })
+def cleanup_published():
+    data = load_publish_list()
+    now_utc = datetime.now(pytz.utc)
 
-    if time.time() - stats["last_reset"] > 86400:
-        stats = {
-            "today_uploads": 0,
-            "success": 0,
-            "failed": 0,
-            "last_reset": time.time()
-        }
+    new_data = []
+    for item in data:
+        publish_time = datetime.fromisoformat(item["publishAt"])
+        if publish_time > now_utc:
+            new_data.append(item)
 
-    stats["today_uploads"] += 1
-    if success:
-        stats["success"] += 1
-    else:
-        stats["failed"] += 1
-
-    save_json(STATS_FILE, stats)
+    save_publish_list(new_data)
 
 
 # ==========================================================
-# MONETIZATION SAFE FILTER
+# YOUTUBE AUTH
 # ==========================================================
-BANNED_WORDS = ["kill", "blood", "sex", "nude", "weapon", "drug"]
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.oauth2.credentials import Credentials
+import json, os
 
-def monetization_safe(text):
-    for word in BANNED_WORDS:
-        if word in text.lower():
-            return False
-    return True
 
-def monetization_risk_score(text):
+def get_youtube_service():
+    creds = None
 
-    score = 0
-    for word in BANNED_WORDS:
-        if word in text.lower():
-            score += 15
+    # ==========================================
+    # 1️⃣ LOAD TOKEN SAFE MODE
+    # ==========================================
+    if os.path.exists(TOKEN_FILE):
+        try:
+            with open(TOKEN_FILE, "r") as f:
+                data = json.load(f)
 
-    return min(score, 100)
+            required_fields = [
+                "token", "refresh_token", "client_id", "client_secret",
+                "token_uri"
+            ]
 
-def generate_pinned_comment(title):
+            if all(field in data for field in required_fields):
+                creds = Credentials.from_authorized_user_info(data, SCOPES)
+            else:
+                print("⚠️ token.json format salah. Menghapus file...")
+                os.remove(TOKEN_FILE)
+                creds = None
 
-    templates = [
-        f"🔥 What do you think about '{title}'?",
-        "💬 Drop your opinion below!",
-        "🚀 Would you try this?",
-        "👇 Comment YES if you agree!"
-    ]
+        except Exception as e:
+            print("⚠️ token.json corrupt:", e)
+            os.remove(TOKEN_FILE)
+            creds = None
 
-    return random.choice(templates)
+    # ==========================================
+    # 2️⃣ REFRESH JIKA EXPIRED
+    # ==========================================
+    if creds and creds.expired and creds.refresh_token:
+        try:
+            print("🔄 Refreshing token...")
+            creds.refresh(Request())
+
+            # Simpan ulang token yang sudah direfresh
+            with open(TOKEN_FILE, "w") as f:
+                f.write(creds.to_json())
+
+            print("✅ Token refreshed!")
+
+        except Exception as e:
+            print("⚠️ Refresh gagal:", e)
+            os.remove(TOKEN_FILE)
+            creds = None
+
+    # ==========================================
+    # 3️⃣ LOGIN ULANG JIKA TIDAK ADA CREDS
+    # ==========================================
+    if not creds or not creds.valid:
+
+        print("🔐 Login YouTube diperlukan...")
+
+        flow = InstalledAppFlow.from_client_secrets_file(
+            CREDENTIALS_FILE, SCOPES, redirect_uri="http://localhost:8080/")
+
+        auth_url, _ = flow.authorization_url(prompt="consent")
+
+        print("\n=====================================")
+        print("Buka URL ini di browser:")
+        print(auth_url)
+        print("=====================================\n")
+
+        code = input("Paste kode setelah 'code=' di sini: ").strip()
+
+        flow.fetch_token(code=code)
+        creds = flow.credentials
+
+        # Simpan token dengan format resmi Google
+        with open(TOKEN_FILE, "w") as f:
+            f.write(creds.to_json())
+
+        print("✅ Login berhasil & token disimpan!")
+
+    # ==========================================
+    # 4️⃣ BUILD SERVICE
+    # ==========================================
+    return build("youtube", "v3", credentials=creds)
+
 
 # ==========================================================
-# TREND SCORE
+# OPENROUTER METADATA
 # ==========================================================
-def trend_score(title):
-    trend_words = ["2026", "viral", "ai", "secret", "new", "trend"]
-    score = 0
-    for w in trend_words:
-        if w in title.lower():
-            score += 5
-    score += random.randint(1, 5)
-    return score
-
-
-# ==========================================================
-# METADATA AI
-# ==========================================================
-async def generate_metadata(keyword):
-
-    if not monetization_safe(keyword):
-        keyword = "Amazing Viral Short"
-
+async def generate_viral_metadata(keyword: str):
     prompt = f"""
-Generate:
-- 5 viral YouTube Shorts titles
-- 1 SEO description including #shorts
-- 12 hashtags
+    You are a YouTube SEO expert for educational 'Fakta Unik Dunia' Shorts.
 
-Topic: {keyword}
+    Rules:
+    - Monetization safe
+    - No copyrighted content references
+    - No movie names
+    - No music titles
+    - No brand trademarks
+    - Educational factual tone
+    - Avoid sensational claims
+    - Avoid "shocking", "you won't believe"
+    - No reused content claims
+    - 8-12 relevant SEO hashtags
 
-Return JSON.
-"""
+    Based on this caption:
+    "{keyword}"
+
+    Return STRICT JSON:
+    {{
+     "titles": [],
+     "description": "",
+     "hashtags": []
+    }}
+    """
 
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json"
     }
-
     payload = {
         "model": "openai/gpt-4o-mini",
-        "messages": [{"role": "user", "content": prompt}],
+        "messages": [{
+            "role": "user",
+            "content": prompt
+        }],
         "temperature": 0.9
     }
 
     async with httpx.AsyncClient(timeout=60) as client:
-        r = await client.post(
+        response = await client.post(
             "https://openrouter.ai/api/v1/chat/completions",
             headers=headers,
-            json=payload
-        )
+            json=payload)
 
-    content = r.json()["choices"][0]["message"]["content"]
+    result = response.json()
+    content = result["choices"][0]["message"]["content"]
     content = re.sub(r"```json|```", "", content)
-
-    try:
-        match = re.search(r"\{.*\}", content, re.DOTALL)
-        data = json.loads(match.group()) if match else {}
-
-        best_title = max(
-            data.get("titles", ["Amazing Viral Short 2026"]),
-            key=trend_score
-        )
-
-        description = data.get("description", "#shorts Viral Content 2026")
-        hashtags = data.get("hashtags", ["shorts", "viral", "trend"])
-
-    except Exception:
-        best_title = "Amazing Viral Short 2026"
-        description = "#shorts Amazing Viral Content"
-        hashtags = ["shorts", "viral", "trend"]
-
+    match = re.search(r"\{.*\}", content, re.DOTALL)
+    if not match:
+        raise Exception("Invalid AI JSON")
+    data = json.loads(match.group())
+    best_title = max(data["titles"], key=len)
     return {
         "title": best_title[:90],
-        "description": description,
-        "hashtags": hashtags
+        "description": data["description"],
+        "hashtags": data["hashtags"]
     }
 
+
+#===================================
+async def list_videos(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    cleanup_published()
+    data = load_publish_list()
+    if not data:
+        await update.message.reply_text("Tidak ada video scheduled.")
+        return
+
+    tz_jakarta = pytz.timezone("Asia/Jakarta")
+
+    text = "📅 Scheduled Videos:\n\n"
+
+    for i, item in enumerate(data, 1):
+        # convert UTC → WIB
+        utc_time = datetime.fromisoformat(item["publishAt"])
+        jakarta_time = utc_time.astimezone(tz_jakarta)
+
+        formatted_time = jakarta_time.strftime("%d %b %Y - %H:%M WIB")
+
+        text += f"{i}. {item['title']}\nPublish: {formatted_time}\n\n"
+
+    await update.message.reply_text(text)
+
+
 # ==========================================================
-# YOUTUBE AUTH
+# UPLOAD
 # ==========================================================
-# ==========================================================
-# YOUTUBE AUTH
-# ==========================================================
-
-def get_youtube_service():
-    creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
-
-    if creds.expired and creds.refresh_token:
-        creds.refresh(Request())
-        with open(TOKEN_FILE, "w") as token:
-            token.write(creds.to_json())
-
-    return build("youtube", "v3", credentials=creds)
-
-
-def get_analytics_service():
-    creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
-    return build("youtubeAnalytics", "v2", credentials=creds)
-
-def fetch_channel_analytics():
-
-    analytics = get_analytics_service()
-
-    end_date = time.strftime("%Y-%m-%d")
-    start_date = time.strftime("%Y-%m-%d", time.localtime(time.time()-7*86400))
-
-    response = analytics.reports().query(
-        ids="channel==MINE",
-        startDate=start_date,
-        endDate=end_date,
-        metrics="views,estimatedMinutesWatched,averageViewDuration,impressions,impressionCtr",
-        dimensions="day"
-    ).execute()
-
-    rows = response.get("rows", [])
-
-    save_json(ANALYTICS_FILE, rows)
-    return rows
-
-def title_performance_score(title):
-
-    score = 0
-
-    if len(title) < 60:
-        score += 10
-
-    if any(x in title.lower() for x in ["how","secret","ai","new"]):
-        score += 15
-
-    score += trend_score(title)
-
-    ctr_est = predict_ctr(title)
-    score += ctr_est
-
-    return round(score, 2)
-
-def get_best_hour_from_analytics():
-
-    analytics = get_analytics_service()
-
-    end_date = time.strftime("%Y-%m-%d")
-    start_date = time.strftime("%Y-%m-%d", time.localtime(time.time()-14*86400))
-
-    response = analytics.reports().query(
-        ids="channel==MINE",
-        startDate=start_date,
-        endDate=end_date,
-        metrics="impressionCtr",
-        dimensions="hour"
-    ).execute()
-
-    rows = response.get("rows", [])
-
-    if not rows:
-        return random.choice([11,13,16,19,21])
-
-    best = max(rows, key=lambda x: x[1])
-
-    return int(best[0])
-def smart_best_hour():
-
-    weekday = time.localtime().tm_wday  # 0=Mon
-
-    if weekday >= 5:
-        base_hours = [10,12,15,18,20]
-    else:
-        base_hours = [11,13,16,19,21]
-
-    try:
-        analytics_hour = get_best_hour_from_analytics()
-        return analytics_hour
-    except:
-        return random.choice(base_hours)
-
-def detect_shadowban():
-
-    analytics = load_json(ANALYTICS_FILE, [])
-
-    if not analytics:
-        return False
-
-    last_day = analytics[-1]
-
-    try:
-    views = float(last_day[0])
-    impressions = float(last_day[3])
-    except:
-        return False
-
-
-    if impressions > 0 and views < impressions * 0.005:
-        return True
-
-    return False
-
-def predict_ctr(title):
-
-    base_score = trend_score(title)
-
-    analytics = load_json(ANALYTICS_FILE, [])
-    avg_ctr = 5
-
-    if analytics:
-        ctr_values = [row[4] for row in analytics if len(row) > 4]
-        if ctr_values:
-            avg_ctr = sum(ctr_values) / len(ctr_values)
-
-    prediction = avg_ctr + (base_score * 0.3)
-
-    return round(min(prediction, 25), 2)
-
-async def upload_video(path, metadata, progress_message):
-
+async def upload_to_youtube(path, metadata):
     loop = asyncio.get_running_loop()
-
-    def progress_callback(percent, eta):
-        if MAIN_LOOP:
-            asyncio.run_coroutine_threadsafe(
-                progress_message.edit_text(
-                    f"🚀 Uploading to YouTube...\n\n"
-                    f"Progress: {percent}%\n"
-                    f"ETA: {eta}s"
-                ),
-                MAIN_LOOP
-            )
-
-    return await loop.run_in_executor(
-        None,
-        _upload_sync,
-        path,
-        metadata,
-        progress_callback
-    )
+    return await loop.run_in_executor(None, _upload_sync, path, metadata)
 
 
-def _upload_sync(path, metadata, progress_callback=None):
-
+def _upload_sync(path, metadata):
+    publish_time = get_next_prime_time()
     youtube = get_youtube_service()
 
     body = {
         "snippet": {
-          "title": metadata.get("title", "Viral Short 2026"),
-            "description": metadata.get("description", "#shorts Viral Content"),
-            "tags": metadata.get("hashtags", ["shorts","viral"]),
-            "categoryId": metadata.get("category", "22")
+            "title": metadata["title"],
+            "description": metadata["description"],
+            "tags": metadata["hashtags"],
+            "categoryId": "22"
         },
-        "status": {"privacyStatus": "public"}
+        "status": {
+            "privacyStatus": "private",
+            "publishAt": publish_time,
+            "madeForKids": False
+        }
     }
 
-    media = MediaFileUpload(path, chunksize=1024*1024, resumable=True)
+    media = MediaFileUpload(path, resumable=True)
 
-    request = youtube.videos().insert(
-        part="snippet,status",
-        body=body,
-        media_body=media
-    )
+    request = youtube.videos().insert(part="snippet,status",
+                                      body=body,
+                                      media_body=media)
 
-    response = None
-    start_time = time.time()
-    total = os.path.getsize(path)
+    # 🔥 EXECUTE DULU
+    response = request.execute()
 
-    while response is None:
-        status, response = request.next_chunk()
+    video_id = response["id"]
 
-        if status and progress_callback:
-            uploaded = status.resumable_progress
-            percent = int(uploaded / total * 100)
+    # 🔥 BARU SIMPAN KE LIST
+    publish_list = load_publish_list()
+    publish_list.append({
+        "video_id": video_id,
+        "title": metadata["title"],
+        "publishAt": publish_time
+    })
+    save_publish_list(publish_list)
 
-            speed = uploaded / (time.time() - start_time + 0.1)
-            eta = (total - uploaded) / (speed + 1)
-
-            progress_callback(percent, round(eta, 1))
-
-    return f"https://youtube.com/watch?v={response['id']}"
-
-def detect_category(keyword):
-
-    keyword = keyword.lower()
-
-    if any(x in keyword for x in ["game","minecraft","pubg"]):
-        return "20"
-    if any(x in keyword for x in ["tech","ai","robot"]):
-        return "28"
-    if any(x in keyword for x in ["learn","how","tutorial"]):
-        return "27"
-
-    return "24"
-
-# ==========================================================
-# AUTO RETRY ENGINE
-# ==========================================================
-async def auto_retry_engine():
-    while True:
-        await asyncio.sleep(600)
-
-        if random.randint(1,10) == 5:
-            fetch_channel_analytics()
-
-        if not upload_queue:
-            continue
-
-        item = upload_queue.pop(0)
-
-        try:
-            url = await upload_video(item["file"], item["meta"])
-            update_stats(True)
-            os.remove(item["file"])
-
-            if ADMIN_CHAT_ID:
-                await BOT_APP.bot.send_message(
-                    ADMIN_CHAT_ID,
-                    f"✅ Auto Retry Success\n{url}"
-                )
-
-        except Exception as e:
-            upload_queue.append(item)
-            update_stats(False)
-
-        save_json(QUEUE_FILE, upload_queue)
+    return f"https://youtube.com/watch?v={video_id}"
 
 
-# ==========================================================
-# HANDLER
-# ==========================================================
-async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    if not update.message or not update.message.video:
+#==========================================================
+# PUBLISH VIDEO
+async def publish_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Gunakan: /publish 1")
         return
 
-    video = update.message.video
-    caption = update.message.caption or "Viral Short 2026"
+    index = int(context.args[0]) - 1
+    data = load_publish_list()
 
-    start_time = time.time()
-    progress_msg = await update.message.reply_text("🚀 Processing your Short...\n")
+    if index >= len(data):
+        await update.message.reply_text("Index tidak valid.")
+        return
 
-    try:
-        # STEP 1 — DOWNLOAD
-    await progress_msg.edit_text("📥 Step 1/4\nDownloading video...")
+    youtube = get_youtube_service()
+    video_id = data[index]["video_id"]
 
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
-            temp_path = tmp.name
+    youtube.videos().update(part="status",
+                            body={
+                                "id": video_id,
+                                "status": {
+                                    "privacyStatus": "public"
+                                }
+                            }).execute()
 
-        file = await context.bot.get_file(video.file_id)
+    data.pop(index)
+    save_publish_list(data)
+
+    await update.message.reply_text("✅ Video dipublish sekarang!")
+
+
+#==========================================================
+async def delete_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Gunakan: /delete 1")
+        return
+
+    index = int(context.args[0]) - 1
+    data = load_publish_list()
+
+    if index >= len(data):
+        await update.message.reply_text("Index tidak valid.")
+        return
+
+    youtube = get_youtube_service()
+    video_id = data[index]["video_id"]
+
+    youtube.videos().delete(id=video_id).execute()
+
+    data.pop(index)
+    save_publish_list(data)
+
+    await update.message.reply_text("🗑 Video berhasil dihapus.")
+
+
+# ==========================================================
+# RETRY WORKER
+# ==========================================================
+async def retry_worker():
+    global upload_limit_reached
+    while True:
+        await asyncio.sleep(1800)
+        if upload_limit_reached and can_retry() and upload_queue:
+            logging.info("Retrying queue...")
+            new_queue = []
+            for item in upload_queue:
+                try:
+                    url = await upload_to_youtube(item["file_path"],
+                                                  item["metadata"])
+                    if ADMIN_CHAT_ID and BOT_APP:
+                        await BOT_APP.bot.send_message(
+                            chat_id=ADMIN_CHAT_ID,
+                            text=f"✅ Retry sukses!\n{url}")
+                    os.remove(item["file_path"])
+                except HttpError as e:
+                    if "uploadLimitExceeded" in str(e):
+                        save_limit_time()
+                        new_queue.append(item)
+                        break
+                    else:
+                        new_queue.append(item)
+                except Exception:
+                    new_queue.append(item)
+            upload_queue.clear()
+            upload_queue.extend(new_queue)
+            save_queue(upload_queue)
+            if not upload_queue:
+                upload_limit_reached = False
+
+
+# ==========================================================
+# VIDEO HANDLER
+# ==========================================================
+async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global upload_limit_reached
+    message = update.message
+    video = message.video
+    if not video:
+        return
+    if video.duration > 60:
+        await message.reply_text("❌ Max 60 seconds.")
+        return
+    caption = message.caption or "Amazing Short"
+    await message.reply_text("⬇️ Downloading...")
+    file = await context.bot.get_file(video.file_id)
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
+        temp_path = tmp.name
         await file.download_to_drive(temp_path)
-
-        # STEP 2 — METADATA
-    await progress_msg.edit_text("🧠 Step 2/4\nGenerating AI Metadata...")
-
-        metadata = await generate_metadata(caption)
-        metadata["category"] = detect_category(caption)
-        ctr_prediction = predict_ctr(metadata["title"])
-        performance_score = title_performance_score(metadata["title"])
-        shadow_flag = detect_shadowban()
-        trend_value = trend_score(metadata["title"])
-        risk_score = monetization_risk_score(metadata["title"])
-
-        # STEP 3 — READY TO UPLOAD
-       await progress_msg.edit_text(
-            f"🏷 Title: {metadata['title'][:60]}...\n"
-            f"📈 Trend Score: {trend_value}\n"
-            f"🎯 Predicted CTR: {ctr_prediction}%\n"
-            f"🏆 Title Score: {performance_score}\n"
-            f"💰 Monetization Risk: {risk_score}%\n"
-            f"🚨 Shadow Risk: {'YES' if shadow_flag else 'NO'}\n\n"
-            "🚀 Uploading..."
-        )
-
-
-        # STEP 4 — UPLOAD WITH LIVE PROGRESS
-        url = await upload_video(temp_path, metadata, progress_msg)
-
-        total_time = round(time.time() - start_time, 2)
-
-        await progress_msg.edit_text(
-            "🎉 UPLOAD SUCCESS 🎉\n\n"
-            f"🔗 {url}\n\n"
-            f"⏱ Time: {total_time}s\n"
-            f"🔥 Trend Score: {trend_value}\n"
-            f"💰 Risk: {risk_score}%"
-        )
-
-        update_stats(True)
+    await message.reply_text("🤖 Generating metadata...")
+    metadata = await generate_viral_metadata(caption)
+    await message.reply_text("🚀 Uploading...")
+    try:
+        url = await upload_to_youtube(temp_path, metadata)
+        await message.reply_text(f"✅ Uploaded!\n{url}")
         os.remove(temp_path)
-
-    except Exception as e:
-
-        print("PROCESS ERROR:", e)
-
-        upload_queue.append({
-            "file": temp_path,
-            "meta": metadata if 'metadata' in locals() else {}
-        })
-
-        save_json(QUEUE_FILE, upload_queue)
-        update_stats(False)
-
-        await progress_msg.edit_text(
-            "⚠️ Upload Failed\n"
-            "Added to Retry Queue.\n\n"
-            f"Error: {str(e)[:100]}"
-        )
-
-# ==========================================================
-# ADMIN COMMAND
-# ==========================================================
-async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    stats = load_json(STATS_FILE, {})
-    queue_len = len(upload_queue)
-
-    await update.message.reply_text(
-        f"📊 Today: {stats.get('today_uploads',0)}\n"
-        f"✅ Success: {stats.get('success',0)}\n"
-        f"❌ Failed: {stats.get('failed',0)}\n"
-        f"📦 Queue: {queue_len}"
-    )
-
-
-# ==========================================================
-# ERROR HANDLER
-# ==========================================================
-async def error_handler(update, context):
-    logging.error(f"Exception: {context.error}")
+    except HttpError as e:
+        if "uploadLimitExceeded" in str(e):
+            upload_limit_reached = True
+            save_limit_time()
+            upload_queue.append({"file_path": temp_path, "metadata": metadata})
+            save_queue(upload_queue)
+            await message.reply_text(
+                "⚠️ Daily limit reached.\nVideo masuk queue auto retry 24 jam."
+            )
+        else:
+            await message.reply_text(f"❌ YouTube Error: {e}")
+            os.remove(temp_path)
 
 
 # ==========================================================
 # STARTUP
 # ==========================================================
 async def on_startup(app):
-    global BOT_APP, upload_queue
+    global upload_queue, BOT_APP
     BOT_APP = app
-    upload_queue = load_json(QUEUE_FILE, [])
-
-    asyncio.create_task(auto_retry_engine())
-    print("✅ Background engine started")
+    cleanup_published()
+    upload_queue = load_queue()
+    await app.bot.delete_webhook(drop_pending_updates=True)
+    app.create_task(retry_worker())
 
 
 # ==========================================================
-# MAIN (WEBHOOK MODE)
+# ERROR HANDLER
+# ==========================================================
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    import traceback
+    print("Error:", traceback.format_exc())
+
+
+# ==========================================================
+# MAIN
 # ==========================================================
 def main():
+    from telegram.ext import CommandHandler
 
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-
     app.add_handler(MessageHandler(filters.VIDEO, handle_video))
-    app.add_handler(CommandHandler("stats", stats_cmd))
     app.add_error_handler(error_handler)
-
     app.post_init = on_startup
-
-    print("🚀 WEBHOOK MODE ACTIVE")
-    global MAIN_LOOP
-    MAIN_LOOP = asyncio.get_event_loop()
-
-    app.run_webhook(
-        listen="0.0.0.0",
-        port=PORT,
-        url_path=TELEGRAM_TOKEN,
-        webhook_url=f"{BASE_URL}/{TELEGRAM_TOKEN}",
-        drop_pending_updates=True,
-    )
+    app.add_handler(CommandHandler("list", list_videos))
+    app.add_handler(CommandHandler("publish", publish_video))
+    app.add_handler(CommandHandler("delete", delete_video))
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(button_handler))
+    app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
-
-
