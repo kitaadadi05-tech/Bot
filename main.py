@@ -250,38 +250,34 @@ async def show_list(query):
 # Publish from button
 #==========================================================
 async def publish_from_button(query, index):
-    data = load_publish_list()
+    global upload_queue
 
-    if index >= len(data):
-        await query.answer("Invalid index")
+    if index >= len(upload_queue):
+        await query.answer("Video tidak ditemukan", show_alert=True)
         return
 
-    youtube = get_youtube_service()
-    video_id = data[index]["video_id"]
+    item = upload_queue[index]
+
+    await query.edit_message_text("🚀 Publishing now...")
 
     try:
-        youtube.videos().update(
-            part="status",
-            body={
-                "id": video_id,
-                "status": {
-                    "privacyStatus": "public",
-                    "publishAt": None  # 🔥 hapus jadwal dulu
-                }
-            }
-        ).execute()
+        url = await upload_to_youtube(
+            item["file_path"],
+            item["metadata"]
+        )
 
-    except HttpError as e:
-        await query.answer("❌ Gagal publish")
-        print("PUBLISH ERROR:", e)
-        return
+        # Hapus dari queue
+        upload_queue.pop(index)
+        save_queue(upload_queue)
 
-    data.pop(index)
-    save_publish_list(data)
+        await query.edit_message_text(
+            f"✅ Successfully Published!\n\n{url}"
+        )
 
-    await query.answer("✅ Video dipublish!")
-    await show_list(query)
-
+    except Exception as e:
+        await query.edit_message_text(
+            f"❌ Publish gagal:\n{str(e)}"
+        )
 #==========================================================
 # Delete from button
 #==========================================================
@@ -797,6 +793,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
