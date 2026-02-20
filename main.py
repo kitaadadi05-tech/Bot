@@ -494,17 +494,19 @@ async def upload_to_youtube(path, metadata):
 
 
 def _upload_sync(path, metadata):
-    publish_time = get_next_prime_time()
+
+    tz = pytz.timezone("Asia/Jakarta")
+    publish_time_utc = get_next_prime_time()
+
     youtube = get_youtube_service()
     publish_list = load_publish_list()
 
-    today = datetime.now(pytz.timezone("Asia/Jakarta")).date()
+    today = datetime.now(tz).date()
 
     today_count = 0
     for item in publish_list:
-        publish_time = datetime.fromisoformat(item["publishAt"]).astimezone(
-            pytz.timezone("Asia/Jakarta"))
-        if publish_time.date() == today:
+        item_time = datetime.fromisoformat(item["publishAt"]).astimezone(tz)
+        if item_time.date() == today:
             today_count += 1
 
     if today_count >= 3:
@@ -519,34 +521,31 @@ def _upload_sync(path, metadata):
         },
         "status": {
             "privacyStatus": "private",
-            "publishAt": publish_time,
+            "publishAt": publish_time_utc,
             "madeForKids": False
         }
     }
 
     media = MediaFileUpload(path, resumable=True)
 
-    request = youtube.videos().insert(part="snippet,status",
-                                      body=body,
-                                      media_body=media)
+    request = youtube.videos().insert(
+        part="snippet,status",
+        body=body,
+        media_body=media
+    )
 
-    # 🔥 EXECUTE DULU
     response = request.execute()
 
     video_id = response["id"]
 
-    # 🔥 BARU SIMPAN KE LIST
-    publish_list = load_publish_list()
     publish_list.append({
         "video_id": video_id,
         "title": metadata["title"],
-        "publishAt": publish_time
+        "publishAt": publish_time_utc
     })
     save_publish_list(publish_list)
 
     return f"https://youtube.com/watch?v={video_id}"
-
-
 #==========================================================
 # PUBLISH VIDEO
 async def publish_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -670,26 +669,41 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await status_msg.edit_text("🚀 Uploading to YouTube...")
 
     try:
-        url = await upload_to_youtube(temp_path, metadata)
+    url = await upload_to_youtube(temp_path, metadata)
 
-        await status_msg.edit_text(f"✅ Uploaded & Scheduled!\n{url}")
+    await status_msg.edit_text(f"✅ Uploaded & Scheduled!\n{url}")
+    os.remove(temp_path)
 
+except HttpError as e:
+    if "uploadLimitExceeded" in str(e):
+        upload_limit_reached = True
+        save_limit_time()
+
+        upload_queue.append({
+            "file_path": temp_path,
+            "metadata": metadata
+        })
+        save_queue(upload_queue)
+
+        await status_msg.edit_text(
+            "⚠️ YouTube daily upload limit.\nMasuk queue auto retry 24 jam."
+        )
+    else:
+        await status_msg.edit_text(f"❌ YouTube Error:\n{e}")
         os.remove(temp_path)
 
-    except HttpError as e:
-        if "uploadLimitExceeded" in str(e):
-            upload_limit_reached = True
-            save_limit_time()
-            upload_queue.append({"file_path": temp_path, "metadata": metadata})
-            save_queue(upload_queue)
+except Exception as e:
+    # 🔥 INI YANG KURANG
+    upload_queue.append({
+        "file_path": temp_path,
+        "metadata": metadata
+    })
+    save_queue(upload_queue)
 
-            await status_msg.edit_text(
-                "⚠️ Daily limit reached.\nMasuk queue auto retry 24 jam.")
-        else:
-            await status_msg.edit_text(f"❌ YouTube Error:\n{e}")
-            os.remove(temp_path)
-
-
+    await status_msg.edit_text(
+        f"⚠️ Slot hari ini penuh / sistem delay.\n"
+        f"Video masuk queue.\n\nReason: {str(e)}"
+    )
 # ==========================================================
 # STARTUP
 # ==========================================================
@@ -774,4 +788,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
