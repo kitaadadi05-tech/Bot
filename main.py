@@ -234,10 +234,17 @@ async def show_list(query):
 
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    await query.edit_message_text(text,
-                                  parse_mode="Markdown",
-                                  reply_markup=reply_markup)
-
+    try:
+        await query.edit_message_text(
+            text,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    except Exception as e:
+        if "Message is not modified" in str(e):
+            pass  # Abaikan
+        else:
+            raise e
 
 #==========================================================
 # Publish from button
@@ -790,6 +797,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
