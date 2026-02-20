@@ -250,34 +250,45 @@ async def show_list(query):
 # Publish from button
 #==========================================================
 async def publish_from_button(query, index):
-    global upload_queue
+    data = load_publish_list()
 
-    if index >= len(upload_queue):
+    if index >= len(data):
         await query.answer("Video tidak ditemukan", show_alert=True)
         return
 
-    item = upload_queue[index]
+    video_id = data[index]["video_id"]
 
     await query.edit_message_text("🚀 Publishing now...")
 
     try:
-        url = await upload_to_youtube(
-            item["file_path"],
-            item["metadata"]
-        )
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, publish_now, video_id)
 
-        # Hapus dari queue
-        upload_queue.pop(index)
-        save_queue(upload_queue)
+        # Hapus dari schedule list
+        data.pop(index)
+        save_publish_list(data)
 
         await query.edit_message_text(
-            f"✅ Successfully Published!\n\n{url}"
+            "✅ Video berhasil dipublish sekarang!"
         )
 
     except Exception as e:
         await query.edit_message_text(
             f"❌ Publish gagal:\n{str(e)}"
         )
+
+def publish_now(video_id):
+    youtube = get_youtube_service()
+
+    youtube.videos().update(
+        part="status",
+        body={
+            "id": video_id,
+            "status": {
+                "privacyStatus": "public"
+            }
+        }
+    ).execute()
 #==========================================================
 # Delete from button
 #==========================================================
@@ -285,16 +296,30 @@ async def delete_from_button(query, index):
     data = load_publish_list()
 
     if index >= len(data):
-        await query.answer("Invalid index")
+        await query.answer("Index tidak valid")
         return
 
-    data.pop(index)
-    save_publish_list(data)
+    video_id = data[index]["video_id"]
 
-    await query.answer("Video dihapus!")
-    await show_list(query)
+    await query.edit_message_text("🗑 Deleting from YouTube...")
 
+    try:
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, delete_video_youtube, video_id)
 
+        data.pop(index)
+        save_publish_list(data)
+
+        await query.edit_message_text("🗑 Video berhasil dihapus!")
+
+    except Exception as e:
+        await query.edit_message_text(
+            f"❌ Gagal hapus:\n{str(e)}"
+        )
+
+def delete_video_youtube(video_id):
+    youtube = get_youtube_service()
+    youtube.videos().delete(id=video_id).execute()
 # ==========================================================
 # CLEANUP PUBLISHED VIDEOS
 # ==========================================================
@@ -793,6 +818,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
