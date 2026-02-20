@@ -669,7 +669,7 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await status_msg.edit_text("🚀 Uploading to YouTube...")
 
     try:
-    url = await upload_to_youtube(temp_path, metadata)
+        url = await upload_to_youtube(temp_path, metadata)
 
     await status_msg.edit_text(
         f"✅ Uploaded & Scheduled!\n{url}"
@@ -793,6 +793,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
