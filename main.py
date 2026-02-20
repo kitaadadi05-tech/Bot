@@ -671,10 +671,13 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
     url = await upload_to_youtube(temp_path, metadata)
 
-    await status_msg.edit_text(f"✅ Uploaded & Scheduled!\n{url}")
+    await status_msg.edit_text(
+        f"✅ Uploaded & Scheduled!\n{url}"
+    )
     os.remove(temp_path)
 
 except HttpError as e:
+
     if "uploadLimitExceeded" in str(e):
         upload_limit_reached = True
         save_limit_time()
@@ -686,14 +689,16 @@ except HttpError as e:
         save_queue(upload_queue)
 
         await status_msg.edit_text(
-            "⚠️ YouTube daily upload limit.\nMasuk queue auto retry 24 jam."
+            "⚠️ YouTube daily upload limit.\n"
+            "Masuk queue auto retry 24 jam."
         )
+
     else:
         await status_msg.edit_text(f"❌ YouTube Error:\n{e}")
         os.remove(temp_path)
 
 except Exception as e:
-    # 🔥 INI YANG KURANG
+
     upload_queue.append({
         "file_path": temp_path,
         "metadata": metadata
@@ -701,7 +706,7 @@ except Exception as e:
     save_queue(upload_queue)
 
     await status_msg.edit_text(
-        f"⚠️ Slot hari ini penuh / sistem delay.\n"
+        f"⚠️ Slot hari ini penuh.\n"
         f"Video masuk queue.\n\nReason: {str(e)}"
     )
 # ==========================================================
@@ -788,5 +793,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
