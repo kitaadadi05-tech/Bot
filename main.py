@@ -252,20 +252,28 @@ async def publish_from_button(query, index):
     youtube = get_youtube_service()
     video_id = data[index]["video_id"]
 
-    youtube.videos().update(part="status",
-                            body={
-                                "id": video_id,
-                                "status": {
-                                    "privacyStatus": "public"
-                                }
-                            }).execute()
+    try:
+        youtube.videos().update(
+            part="status",
+            body={
+                "id": video_id,
+                "status": {
+                    "privacyStatus": "public",
+                    "publishAt": None  # 🔥 hapus jadwal dulu
+                }
+            }
+        ).execute()
+
+    except HttpError as e:
+        await query.answer("❌ Gagal publish")
+        print("PUBLISH ERROR:", e)
+        return
 
     data.pop(index)
     save_publish_list(data)
 
     await query.answer("✅ Video dipublish!")
     await show_list(query)
-
 
 #==========================================================
 # Delete from button
@@ -766,3 +774,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
