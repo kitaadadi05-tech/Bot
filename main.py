@@ -193,59 +193,59 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await delete_from_button(query, index)
 
     elif data == "help":
-        await query.edit_message_text("📌 Cara Pakai:\n\n"
-                                      "1️⃣ Kirim video Shorts\n"
-                                      "2️⃣ Bot auto schedule\n"
-                                      "3️⃣ Kelola via tombol\n\n"
-                                      "Jam publish: 12, 17, 20 WIB")
+        await query.edit_message_text(
+            "📌 Cara Pakai:\n\n"
+            "1️⃣ Kirim video Shorts\n"
+            "2️⃣ Bot auto schedule\n"
+            "3️⃣ Kelola via tombol\n\n"
+            "Jam publish: 12, 17, 20 WIB"
+        )
 
     elif data == "dashboard":
 
-    await query.answer("🔄 Refreshing dashboard...")
+        await query.answer("🔄 Refreshing dashboard...")
 
-    try:
-        stats = get_dashboard_stats()
-
-        next_text = "Tidak ada"
-        if stats["next_publish"]:
-            next_text = stats["next_publish"].strftime("%d %b %Y - %H:%M WIB")
-
-        text = (
-            "🚀 *YouTube Shorts Automation PRO*\n\n"
-            f"📊 Scheduled: {stats['total']}\n"
-            f"🕒 Next Publish: {next_text}\n"
-            f"🔥 Slot Today: {stats['today_slots']}/3\n\n"
-            "Kelola video di bawah 👇"
-        )
-
-        keyboard = [
-            [InlineKeyboardButton("📅 Manage Videos", callback_data="list")],
-            [InlineKeyboardButton("📤 Upload Guide", callback_data="help")],
-            [InlineKeyboardButton("🔄 Refresh", callback_data="dashboard")]
-        ]
-
-        # 🔥 HAPUS message lama (optional, aman)
         try:
-            await query.message.delete()
-        except:
-            pass
+            stats = get_dashboard_stats()
 
-        # 🔥 Kirim message baru (lebih stabil dari edit)
-        await context.bot.send_message(
-            chat_id=query.message.chat_id,
-            text=text,
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+            next_text = "Tidak ada"
+            if stats["next_publish"]:
+                next_text = stats["next_publish"].strftime("%d %b %Y - %H:%M WIB")
 
-    except Exception as e:
-        import traceback
-        tb = traceback.format_exc()
+            text = (
+                "🚀 *YouTube Shorts Automation PRO*\n\n"
+                f"📊 Scheduled: {stats['total']}\n"
+                f"🕒 Next Publish: {next_text}\n"
+                f"🔥 Slot Today: {stats['today_slots']}/3\n\n"
+                "Kelola video di bawah 👇"
+            )
 
-        await context.bot.send_message(
-            chat_id=query.message.chat_id,
-            text="⚠️ Dashboard Error:\n\n" + tb[:1000]
-        )
+            keyboard = [
+                [InlineKeyboardButton("📅 Manage Videos", callback_data="list")],
+                [InlineKeyboardButton("📤 Upload Guide", callback_data="help")],
+                [InlineKeyboardButton("🔄 Refresh", callback_data="dashboard")]
+            ]
+
+            try:
+                await query.message.delete()
+            except:
+                pass
+
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=text,
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+
+        except Exception:
+            import traceback
+            tb = traceback.format_exc()
+
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text="⚠️ Dashboard Error:\n\n" + tb[:1000]
+            )
 #==========================================================
 #Modern Sheduled list
 #==========================================================
@@ -1121,6 +1121,7 @@ def main():
 if __name__ == "__main__":
     app.run_polling(drop_pending_updates=True)
     main()
+
 
 
 
