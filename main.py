@@ -968,21 +968,41 @@ def sync_scheduled_from_youtube():
     youtube = get_youtube_service()
     tz = pytz.timezone("Asia/Jakarta")
 
-    request = youtube.videos().list(
-        part="snippet,status",
-        mine=True,
+    # 1️⃣ Ambil channel ID
+    channel_response = youtube.channels().list(
+        part="contentDetails",
+        mine=True
+    ).execute()
+
+    uploads_playlist_id = channel_response["items"][0]["contentDetails"]["relatedPlaylists"]["uploads"]
+
+    # 2️⃣ Ambil video dari uploads playlist
+    request = youtube.playlistItems().list(
+        part="snippet",
+        playlistId=uploads_playlist_id,
         maxResults=50
     )
 
-    response = request.execute()
+    playlist_response = request.execute()
 
     new_publish_list = []
+    now_utc = datetime.now(pytz.utc)
 
-    now_utc = datetime.utcnow().replace(tzinfo=pytz.utc)
+    for item in playlist_response.get("items", []):
+        video_id = item["snippet"]["resourceId"]["videoId"]
 
-    for item in response.get("items", []):
-        status = item.get("status", {})
-        snippet = item.get("snippet", {})
+        # 3️⃣ Ambil status video
+        video_response = youtube.videos().list(
+            part="snippet,status",
+            id=video_id
+        ).execute()
+
+        if not video_response["items"]:
+            continue
+
+        video = video_response["items"][0]
+        status = video.get("status", {})
+        snippet = video.get("snippet", {})
 
         publish_at = status.get("publishAt")
         privacy = status.get("privacyStatus")
@@ -993,9 +1013,8 @@ def sync_scheduled_from_youtube():
             )
 
             if publish_time > now_utc:
-
                 new_publish_list.append({
-                    "video_id": item["id"],
+                    "video_id": video_id,
                     "titles": [snippet.get("title", "")],
                     "current_title_index": 0,
                     "publishAt": publish_at,
@@ -1062,6 +1081,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
