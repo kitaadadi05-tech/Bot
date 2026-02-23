@@ -282,7 +282,8 @@ async def analytics_report_worker(context: ContextTypes.DEFAULT_TYPE):
         "v2",
         credentials=creds
     )
-
+    views = row[1]
+    avg_percent = float(row[2])
     yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
     report = youtube_analytics.reports().query(
@@ -302,7 +303,10 @@ async def analytics_report_worker(context: ContextTypes.DEFAULT_TYPE):
         for item in publish_list:
             if item["video_id"] == video_id and item.get("ab_test"):
 
-                item.setdefault("ctr_history", []).append(avg_percent)
+                item.setdefault("metrics_history", []).append({
+                    "views": views,
+                    "retention": avg_percent
+                })
 
                 publish_time = datetime.fromisoformat(item["publishAt"])
                 update_prime_stats(video_id, avg_percent, publish_time)
@@ -705,12 +709,12 @@ async def ab_test_worker(context: ContextTypes.DEFAULT_TYPE):
             continue
 
         titles = item.get("titles", [])
-        ctr_history = item.get("ctr_history", [])
+        metrics = item.get("metrics_history", [])
         index = item.get("current_title_index", 0)
 
-        # =====================
-        # DAY 2 & 3 ROTATION
-        # =====================
+        # =========================
+        # DAY 2 & 3 → ROTATE TITLE
+        # =========================
         if index < len(titles) - 1:
 
             new_index = index + 1
@@ -729,13 +733,26 @@ async def ab_test_worker(context: ContextTypes.DEFAULT_TYPE):
 
             item["current_title_index"] = new_index
 
-        # =====================
-        # DAY 4 PICK WINNER
-        # =====================
+        # =========================
+        # DAY 4 → PICK WINNER (Weighted Score)
+        # =========================
         else:
-            if ctr_history:
 
-                best_index = ctr_history.index(max(ctr_history))
+            if metrics and len(metrics) == len(titles):
+
+                # Cari max views untuk normalisasi
+                max_views = max(m["views"] for m in metrics) or 1
+
+                scores = []
+
+                for m in metrics:
+                    views_score = m["views"] / max_views
+                    retention_score = m["retention"] / 100
+
+                    final_score = (retention_score * 0.6) + (views_score * 0.4)
+                    scores.append(final_score)
+
+                best_index = scores.index(max(scores))
                 best_title = titles[best_index]
 
                 youtube.videos().update(
@@ -751,6 +768,7 @@ async def ab_test_worker(context: ContextTypes.DEFAULT_TYPE):
 
                 item["current_title_index"] = best_index
 
+            # Stop A/B test setelah winner dipilih
             item["ab_test"] = False
 
     save_publish_list(data)
@@ -1022,7 +1040,9 @@ def main():
     )
 
 if __name__ == "__main__":
+    app.run_polling(drop_pending_updates=True)
     main()
+
 
 
 
