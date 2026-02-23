@@ -240,7 +240,7 @@ async def show_list(query):
     keyboard = []
 
     for i, item in enumerate(data):
-        title = item["title"]
+        title = item["titles"][item.get("current_title_index", 0)]
         publish_time = datetime.fromisoformat(item["publishAt"])
         jakarta_time = publish_time.astimezone(pytz.timezone("Asia/Jakarta"))
 
@@ -1017,6 +1017,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
