@@ -968,51 +968,54 @@ def sync_scheduled_from_youtube():
     youtube = get_youtube_service()
     tz = pytz.timezone("Asia/Jakarta")
 
-    # 1️⃣ Ambil channel ID
-    channel_response = youtube.channels().list(
+    # Ambil uploads playlist ID
+    channel = youtube.channels().list(
         part="contentDetails",
         mine=True
     ).execute()
 
-    uploads_playlist_id = channel_response["items"][0]["contentDetails"]["relatedPlaylists"]["uploads"]
+    uploads_playlist_id = channel["items"][0]["contentDetails"]["relatedPlaylists"]["uploads"]
 
-    # 2️⃣ Ambil video dari uploads playlist
+    # Ambil semua video dari uploads playlist
     request = youtube.playlistItems().list(
         part="snippet",
         playlistId=uploads_playlist_id,
         maxResults=50
     )
 
-    playlist_response = request.execute()
+    response = request.execute()
 
     new_publish_list = []
     now_utc = datetime.now(pytz.utc)
 
-    for item in playlist_response.get("items", []):
+    for item in response.get("items", []):
+
         video_id = item["snippet"]["resourceId"]["videoId"]
 
-        # 3️⃣ Ambil status video
-        video_response = youtube.videos().list(
+        # Ambil detail video
+        video = youtube.videos().list(
             part="snippet,status",
             id=video_id
         ).execute()
 
-        if not video_response["items"]:
+        if not video["items"]:
             continue
 
-        video = video_response["items"][0]
-        status = video.get("status", {})
-        snippet = video.get("snippet", {})
+        v = video["items"][0]
+        status = v["status"]
+        snippet = v["snippet"]
 
         publish_at = status.get("publishAt")
-        privacy = status.get("privacyStatus")
 
-        if publish_at and privacy == "private":
+        # 🔥 Jangan filter privacy
+        if publish_at:
+
             publish_time = datetime.fromisoformat(
                 publish_at.replace("Z", "+00:00")
             )
 
             if publish_time > now_utc:
+
                 new_publish_list.append({
                     "video_id": video_id,
                     "titles": [snippet.get("title", "")],
@@ -1023,6 +1026,7 @@ def sync_scheduled_from_youtube():
                 })
 
     save_publish_list(new_publish_list)
+
     return len(new_publish_list)
 # ==========================================================
 # MAIN
@@ -1081,6 +1085,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
