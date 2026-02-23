@@ -334,8 +334,8 @@ async def analytics_report_worker(context: ContextTypes.DEFAULT_TYPE):
 
     save_publish_list(publish_list)
 
-        if ADMIN_CHAT_ID and BOT_APP:
-            await BOT_APP.bot.send_message(ADMIN_CHAT_ID, text)
+    if ADMIN_CHAT_ID and BOT_APP:
+        await BOT_APP.bot.send_message(ADMIN_CHAT_ID, text)
 #==========================================================
 # Publish from button
 #==========================================================
@@ -1121,6 +1121,7 @@ def main():
 if __name__ == "__main__":
     app.run_polling(drop_pending_updates=True)
     main()
+
 
 
 
