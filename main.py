@@ -1118,20 +1118,8 @@ def main():
         close_loop=False
     )
 
-from telegram.ext import Application
-
 if __name__ == "__main__":
-
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
-
-    app.add_handler(CallbackQueryHandler(button_handler))
-    app.add_handler(MessageHandler(filters.VIDEO, handle_video))
-
-    app.add_error_handler(error_handler)
-
-    app.run_polling(drop_pending_updates=True)
-
-
+    main()
 
 
 
