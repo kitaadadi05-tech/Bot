@@ -30,7 +30,7 @@ QUEUE_FILE = "queue.json"
 LIMIT_FILE = "limit.json"
 PUBLISH_FILE = "publish_list.json"
 
-SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
+SCOPES = ["https://www.googleapis.com/auth/youtube"]
 
 TOKEN_FILE = "token.json"
 CREDENTIALS_FILE = "credential10.json"
@@ -280,7 +280,7 @@ async def publish_from_button(query, index):
 def publish_now(video_id):
     youtube = get_youtube_service()
 
-    youtube.videos().update(
+       youtube.videos().update(
         part="status",
         body={
             "id": video_id,
@@ -541,19 +541,18 @@ def _upload_sync(path, metadata):
         raise Exception("Daily prime slot penuh (3/hari)")
 
     body = {
-        "snippet": {
-            "title": metadata["title"],
-            "description": metadata["description"],
-            "tags": metadata["hashtags"],
-            "categoryId": "22"
-        },
-        "status": {
-            "privacyStatus": "private",
-            "publishAt": publish_time_utc,
-            "madeForKids": False
-        }
+    "snippet": {
+        "title": metadata["title"],
+        "description": metadata["description"],
+        "tags": metadata["hashtags"],
+        "categoryId": "22"
+    },
+    "status": {
+        "privacyStatus": "private",
+        "publishAt": publish_time_utc,
+        "selfDeclaredMadeForKids": False
     }
-
+}
     media = MediaFileUpload(path, resumable=True)
 
     request = youtube.videos().insert(
@@ -818,6 +817,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
