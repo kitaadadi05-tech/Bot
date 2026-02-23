@@ -201,17 +201,22 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "dashboard":
 
+    await query.answer("🔄 Refreshing dashboard...")
+
+    try:
         stats = get_dashboard_stats()
 
         next_text = "Tidak ada"
         if stats["next_publish"]:
             next_text = stats["next_publish"].strftime("%d %b %Y - %H:%M WIB")
 
-        text = ("🚀 *YouTube Shorts Automation PRO*\n\n"
-                f"📊 Scheduled: {stats['total']}\n"
-                f"🕒 Next Publish: {next_text}\n"
-                f"🔥 Slot Today: {stats['today_slots']}/3\n\n"
-                "Kelola video di bawah 👇")
+        text = (
+            "🚀 *YouTube Shorts Automation PRO*\n\n"
+            f"📊 Scheduled: {stats['total']}\n"
+            f"🕒 Next Publish: {next_text}\n"
+            f"🔥 Slot Today: {stats['today_slots']}/3\n\n"
+            "Kelola video di bawah 👇"
+        )
 
         keyboard = [
             [InlineKeyboardButton("📅 Manage Videos", callback_data="list")],
@@ -219,12 +224,28 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🔄 Refresh", callback_data="dashboard")]
         ]
 
-        await query.edit_message_text(
-            text,
+        # 🔥 HAPUS message lama (optional, aman)
+        try:
+            await query.message.delete()
+        except:
+            pass
+
+        # 🔥 Kirim message baru (lebih stabil dari edit)
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=text,
             parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(keyboard))
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
 
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
 
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text="⚠️ Dashboard Error:\n\n" + tb[:1000]
+        )
 #==========================================================
 #Modern Sheduled list
 #==========================================================
@@ -941,6 +962,8 @@ async def on_startup(app):
     cleanup_published()
     upload_queue = load_queue()
     await app.bot.delete_webhook(drop_pending_updates=True)
+    count = sync_scheduled_from_youtube()
+    print(f"Synced {count} scheduled videos from YouTube")
     app.create_task(ab_test_worker())
     app.create_task(analytics_report_worker())
     app.create_task(retry_worker())
@@ -982,15 +1005,71 @@ def get_dashboard_stats():
 # ==========================================================
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     import traceback
-    error_text = traceback.format_exc()
-    print("Error:", error_text)
+
+    error = context.error
+
+    if error is None:
+        print("Unknown error without exception object.")
+        return
+
+    tb = "".join(
+        traceback.format_exception(
+            type(error),
+            error,
+            error.__traceback__
+        )
+    )
+
+    print("=== BOT ERROR ===")
+    print(tb)
 
     if ADMIN_CHAT_ID and BOT_APP:
-        await BOT_APP.bot.send_message(chat_id=ADMIN_CHAT_ID,
-                                       text="⚠️ BOT ERROR:\n" +
-                                       error_text[:1000])
+        await BOT_APP.bot.send_message(
+            chat_id=ADMIN_CHAT_ID,
+            text="⚠️ BOT ERROR:\n\n" + tb[:3500]
+        )
 
+def sync_scheduled_from_youtube():
+    youtube = get_youtube_service()
+    tz = pytz.timezone("Asia/Jakarta")
 
+    request = youtube.videos().list(
+        part="snippet,status",
+        mine=True,
+        maxResults=50
+    )
+
+    response = request.execute()
+
+    new_publish_list = []
+
+    now_utc = datetime.utcnow().replace(tzinfo=pytz.utc)
+
+    for item in response.get("items", []):
+        status = item.get("status", {})
+        snippet = item.get("snippet", {})
+
+        publish_at = status.get("publishAt")
+        privacy = status.get("privacyStatus")
+
+        if publish_at and privacy == "private":
+            publish_time = datetime.fromisoformat(
+                publish_at.replace("Z", "+00:00")
+            )
+
+            if publish_time > now_utc:
+
+                new_publish_list.append({
+                    "video_id": item["id"],
+                    "titles": [snippet.get("title", "")],
+                    "current_title_index": 0,
+                    "publishAt": publish_at,
+                    "ab_test": False,
+                    "metrics_history": []
+                })
+
+    save_publish_list(new_publish_list)
+    return len(new_publish_list)
 # ==========================================================
 # MAIN
 # ==========================================================
@@ -1042,6 +1121,7 @@ def main():
 if __name__ == "__main__":
     app.run_polling(drop_pending_updates=True)
     main()
+
 
 
 
