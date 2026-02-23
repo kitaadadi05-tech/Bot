@@ -280,15 +280,18 @@ async def publish_from_button(query, index):
 def publish_now(video_id):
     youtube = get_youtube_service()
 
-       youtube.videos().update(
+    response = youtube.videos().update(
         part="status",
         body={
             "id": video_id,
             "status": {
-                "privacyStatus": "public"
+                "privacyStatus": "public",
+                "selfDeclaredMadeForKids": False
             }
         }
     ).execute()
+
+    print("Publish response:", response)
 #==========================================================
 # Delete from button
 #==========================================================
@@ -319,7 +322,8 @@ async def delete_from_button(query, index):
 
 def delete_video_youtube(video_id):
     youtube = get_youtube_service()
-    youtube.videos().delete(id=video_id).execute()
+    response = youtube.videos().delete(id=video_id).execute()
+    print("Delete response:", response)
 # ==========================================================
 # CLEANUP PUBLISHED VIDEOS
 # ==========================================================
@@ -817,6 +821,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
