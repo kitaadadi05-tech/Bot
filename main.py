@@ -655,9 +655,15 @@ def _upload_sync(path, metadata):
     if today_count >= 3:
         raise Exception("Daily prime slot penuh (3/hari)")
 
-    body = {
+   if not metadata.get("titles"):
+    raise Exception("AI tidak menghasilkan title")
+
+    if not metadata.get("description"):
+     raise Exception("AI tidak menghasilkan description")
+    
+   body = {
     "snippet": {
-        "title": metadata["title"],
+        "title": metadata["titles"][0],  # ✅ ambil title pertama
         "description": metadata["description"],
         "tags": metadata["hashtags"],
         "categoryId": "22"
@@ -667,6 +673,7 @@ def _upload_sync(path, metadata):
         "publishAt": publish_time_utc,
         "selfDeclaredMadeForKids": False
     }
+}
 }
     media = MediaFileUpload(path, resumable=True)
 
@@ -1003,6 +1010,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
