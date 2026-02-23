@@ -6,7 +6,7 @@ import tempfile
 import httpx
 import time
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
 import pytz
 import random
 from telegram import Update
@@ -1094,14 +1094,14 @@ def main():
 
         await app.bot.delete_webhook(drop_pending_updates=True)
 
-        app.job_queue.run_daily(
-            analytics_report_worker,
-            time=time(hour=23, minute=59)
+         app.job_queue.run_daily(
+        analytics_report_worker,
+        time=time(hour=23, minute=59)
         )
-        
+    
         app.job_queue.run_daily(
-            ab_test_worker,
-            time=time(hour=0, minute=5)
+        ab_test_worker,
+        time=time(hour=0, minute=5)
         )
         
         app.job_queue.run_repeating(
@@ -1120,6 +1120,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
