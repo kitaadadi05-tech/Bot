@@ -475,86 +475,21 @@ import json, os
 
 
 def get_youtube_service():
-    creds = None
+    if not os.path.exists(TOKEN_FILE):
+        raise Exception("token.json tidak ditemukan. Generate di local dulu.")
 
-    # ==========================================
-    # 1️⃣ LOAD TOKEN SAFE MODE
-    # ==========================================
-    if os.path.exists(TOKEN_FILE):
-        try:
-            with open(TOKEN_FILE, "r") as f:
-                data = json.load(f)
+    with open(TOKEN_FILE, "r") as f:
+        creds = Credentials.from_authorized_user_info(json.load(f), SCOPES)
 
-            required_fields = [
-                "token", "refresh_token", "client_id", "client_secret",
-                "token_uri"
-            ]
-
-            if all(field in data for field in required_fields):
-                creds = Credentials.from_authorized_user_info(data, SCOPES)
-            else:
-                print("⚠️ token.json format salah. Menghapus file...")
-                os.remove(TOKEN_FILE)
-                creds = None
-
-        except Exception as e:
-            print("⚠️ token.json corrupt:", e)
-            os.remove(TOKEN_FILE)
-            creds = None
-
-    # ==========================================
-    # 2️⃣ REFRESH JIKA EXPIRED
-    # ==========================================
-    if creds and creds.expired and creds.refresh_token:
-        try:
-            print("🔄 Refreshing token...")
-            creds.refresh(Request())
-
-            # Simpan ulang token yang sudah direfresh
-            with open(TOKEN_FILE, "w") as f:
-                f.write(creds.to_json())
-
-            print("✅ Token refreshed!")
-
-        except Exception as e:
-            print("⚠️ Refresh gagal:", e)
-            os.remove(TOKEN_FILE)
-            creds = None
-
-    # ==========================================
-    # 3️⃣ LOGIN ULANG JIKA TIDAK ADA CREDS
-    # ==========================================
-    if not creds or not creds.valid:
-
-        print("🔐 Login YouTube diperlukan...")
-
-        flow = InstalledAppFlow.from_client_secrets_file(
-            CREDENTIALS_FILE, SCOPES, redirect_uri="http://localhost:8080/")
-
-        auth_url, _ = flow.authorization_url(prompt="consent")
-
-        print("\n=====================================")
-        print("Buka URL ini di browser:")
-        print(auth_url)
-        print("=====================================\n")
-
-        code = input("Paste kode setelah 'code=' di sini: ").strip()
-
-        flow.fetch_token(code=code)
-        creds = flow.credentials
-
-        # Simpan token dengan format resmi Google
+    if creds.expired and creds.refresh_token:
+        creds.refresh(Request())
         with open(TOKEN_FILE, "w") as f:
             f.write(creds.to_json())
 
-        print("✅ Login berhasil & token disimpan!")
+    if not creds.valid:
+        raise Exception("YouTube token invalid. Re-generate token.json.")
 
-    # ==========================================
-    # 4️⃣ BUILD SERVICE
-    # ==========================================
     return build("youtube", "v3", credentials=creds)
-
-
 # ==========================================================
 # OPENROUTER METADATA
 # ==========================================================
@@ -1127,6 +1062,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
