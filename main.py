@@ -968,7 +968,7 @@ def sync_scheduled_from_youtube():
     youtube = get_youtube_service()
     tz = pytz.timezone("Asia/Jakarta")
 
-    # Ambil uploads playlist ID
+    # Ambil uploads playlist
     channel = youtube.channels().list(
         part="contentDetails",
         mine=True
@@ -976,45 +976,38 @@ def sync_scheduled_from_youtube():
 
     uploads_playlist_id = channel["items"][0]["contentDetails"]["relatedPlaylists"]["uploads"]
 
-    # Ambil semua video dari uploads playlist
-    request = youtube.playlistItems().list(
-        part="snippet",
-        playlistId=uploads_playlist_id,
-        maxResults=50
-    )
-
-    response = request.execute()
-
     new_publish_list = []
-    now_utc = datetime.now(pytz.utc)
+    next_page_token = None
 
-    for item in response.get("items", []):
-
-        video_id = item["snippet"]["resourceId"]["videoId"]
-
-        # Ambil detail video
-        video = youtube.videos().list(
-            part="snippet,status",
-            id=video_id
+    while True:
+        playlist = youtube.playlistItems().list(
+            part="snippet",
+            playlistId=uploads_playlist_id,
+            maxResults=50,
+            pageToken=next_page_token
         ).execute()
 
-        if not video["items"]:
-            continue
+        for item in playlist.get("items", []):
+            video_id = item["snippet"]["resourceId"]["videoId"]
 
-        v = video["items"][0]
-        status = v["status"]
-        snippet = v["snippet"]
+            video = youtube.videos().list(
+                part="snippet,status",
+                id=video_id
+            ).execute()
 
-        publish_at = status.get("publishAt")
+            if not video["items"]:
+                continue
 
-        # 🔥 Jangan filter privacy
-        if publish_at:
+            v = video["items"][0]
+            status = v["status"]
+            snippet = v["snippet"]
 
-            publish_time = datetime.fromisoformat(
-                publish_at.replace("Z", "+00:00")
-            )
+            publish_at = status.get("publishAt")
 
-            if publish_time > now_utc:
+            if publish_at:
+                publish_time = datetime.fromisoformat(
+                    publish_at.replace("Z", "+00:00")
+                )
 
                 new_publish_list.append({
                     "video_id": video_id,
@@ -1025,9 +1018,22 @@ def sync_scheduled_from_youtube():
                     "metrics_history": []
                 })
 
-    save_publish_list(new_publish_list)
+        next_page_token = playlist.get("nextPageToken")
+        if not next_page_token:
+            break
 
-    return len(new_publish_list)
+        existing = load_publish_list()
+        
+        merged = {item["video_id"]: item for item in existing}
+        
+        for item in new_publish_list:
+            merged[item["video_id"]] = item
+        
+        final_list = list(merged.values())
+        
+        save_publish_list(final_list)
+        
+        return len(final_list)
 # ==========================================================
 # MAIN
 # ==========================================================
@@ -1085,6 +1091,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
