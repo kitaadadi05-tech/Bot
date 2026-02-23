@@ -851,7 +851,7 @@ async def delete_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==========================================================
 # RETRY WORKER
 # ==========================================================
-async def retry_worker():
+async def retry_worker(context: ContextTypes.DEFAULT_TYPE):
     global upload_limit_reached
     while True:
         await asyncio.sleep(1800)
@@ -1127,6 +1127,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
