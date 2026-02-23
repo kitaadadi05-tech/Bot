@@ -30,7 +30,10 @@ QUEUE_FILE = "queue.json"
 LIMIT_FILE = "limit.json"
 PUBLISH_FILE = "publish_list.json"
 
-SCOPES = ["https://www.googleapis.com/auth/youtube"]
+SCOPES = [
+    "https://www.googleapis.com/auth/youtube",
+    "https://www.googleapis.com/auth/yt-analytics.readonly"
+]
 
 TOKEN_FILE = "token.json"
 CREDENTIALS_FILE = "credential10.json"
@@ -85,42 +88,62 @@ def save_publish_list(data):
 
 #============================================================
 # PRIME TIME CHECKER
-
-
 def get_next_prime_time():
     tz = pytz.timezone("Asia/Jakarta")
     now = datetime.now(tz)
 
     prime_hours = [12, 17, 20]
+    max_per_hour = 3
+    max_per_day = 9
+
     publish_list = load_publish_list()
 
-    # ambil semua waktu yang sudah terpakai
-    used_times = set(item["publishAt"] for item in publish_list)
-
-    for day_offset in range(7):  # cek 7 hari ke depan
+    # cek 7 hari ke depan
+    for day_offset in range(7):
         check_day = now + timedelta(days=day_offset)
+        date_only = check_day.date()
 
+        # ambil semua publish di hari tersebut
+        day_videos = []
+        for item in publish_list:
+            publish_time = datetime.fromisoformat(item["publishAt"]).astimezone(tz)
+            if publish_time.date() == date_only:
+                day_videos.append(publish_time)
+
+        # kalau sudah 9 → skip ke hari berikutnya
+        if len(day_videos) >= max_per_day:
+            continue
+
+        # hitung slot per jam
+        hour_count = {h: 0 for h in prime_hours}
+        for publish_time in day_videos:
+            if publish_time.hour in hour_count:
+                hour_count[publish_time.hour] += 1
+
+        # cari jam yang belum penuh
         for hour in prime_hours:
-            random_minute = random.randint(3, 27)
+            if hour_count[hour] < max_per_hour:
 
-            candidate = check_day.replace(hour=hour,
-                                          minute=random_minute,
-                                          second=0,
-                                          microsecond=0)
+                # random minute + second biar natural
+                random_minute = random.randint(5, 55)
+                random_second = random.randint(0, 59)
 
-            if candidate <= now:
-                continue
+                candidate = check_day.replace(
+                    hour=hour,
+                    minute=random_minute,
+                    second=random_second,
+                    microsecond=0
+                )
 
-            utc_time = candidate.astimezone(pytz.utc).isoformat()
+                # jangan ambil waktu yang sudah lewat
+                if candidate <= now:
+                    continue
 
-            if utc_time not in used_times:
-                return utc_time
+                return candidate.astimezone(pytz.utc).isoformat()
 
-    # fallback
+    # fallback (harusnya jarang kejadian)
     fallback = now + timedelta(days=1)
     return fallback.astimezone(pytz.utc).isoformat()
-
-
 #============================================================
 # Start UI
 #============================================================
@@ -246,6 +269,49 @@ async def show_list(query):
         else:
             raise e
 
+
+async def analytics_report_worker():
+    tz = pytz.timezone("Asia/Jakarta")
+
+    while True:
+        now = datetime.now(tz)
+
+        # kirim tiap jam 23:59 WIB
+        target = now.replace(hour=23, minute=59, second=0)
+
+        wait_seconds = (target - now).total_seconds()
+        if wait_seconds < 0:
+            wait_seconds += 86400
+
+        await asyncio.sleep(wait_seconds)
+
+        youtube_analytics = build(
+            "youtubeAnalytics",
+            "v2",
+            credentials=get_youtube_service()._http.credentials
+        )
+
+        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+
+        report = youtube_analytics.reports().query(
+            ids="channel==MINE",
+            startDate=yesterday,
+            endDate=yesterday,
+            metrics="views,estimatedMinutesWatched,averageViewDuration,averageViewPercentage",
+            dimensions="video"
+        ).execute()
+
+        text = f"📊 REPORT {yesterday}\n\n"
+
+        for row in report.get("rows", []):
+            video_id = row[0]
+            views = row[1]
+            avg_percent = row[4]
+
+            text += f"{video_id}\nViews: {views}\nCTR Retention: {avg_percent}%\n\n"
+
+        if ADMIN_CHAT_ID and BOT_APP:
+            await BOT_APP.bot.send_message(ADMIN_CHAT_ID, text)
 #==========================================================
 # Publish from button
 #==========================================================
@@ -487,11 +553,10 @@ async def generate_viral_metadata(keyword: str):
     data = json.loads(match.group())
     best_title = max(data["titles"], key=len)
     return {
-        "title": best_title[:90],
-        "description": data["description"],
-        "hashtags": data["hashtags"]
+    "titles": data["titles"][:3],
+    "description": data["description"],
+    "hashtags": data["hashtags"]
     }
-
 
 #===================================
 async def list_videos(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -571,12 +636,53 @@ def _upload_sync(path, metadata):
 
     publish_list.append({
         "video_id": video_id,
-        "title": metadata["title"],
-        "publishAt": publish_time_utc
+        "titles": metadata["titles"],
+        "current_title_index": 0,
+        "publishAt": publish_time_utc,
+        "ab_test": True,
+        "ctr_history": []
     })
     save_publish_list(publish_list)
 
     return f"https://youtube.com/watch?v={video_id}"
+
+async def ab_test_worker():
+    while True:
+        await asyncio.sleep(86400)  # 24 jam
+
+        youtube = get_youtube_service()
+        data = load_publish_list()
+
+        for item in data:
+            if not item.get("ab_test"):
+                continue
+
+            index = item["current_title_index"]
+            titles = item["titles"]
+
+            # kalau masih dalam 3 hari pertama
+            if index < len(titles) - 1:
+                new_index = index + 1
+                new_title = titles[new_index]
+
+                youtube.videos().update(
+                    part="snippet",
+                    body={
+                        "id": item["video_id"],
+                        "snippet": {
+                            "title": new_title,
+                            "categoryId": "22"
+                        }
+                    }
+                ).execute()
+
+                item["current_title_index"] = new_index
+
+            else:
+                # sudah selesai A/B
+                item["ab_test"] = False
+
+        save_publish_list(data)
 #==========================================================
 # PUBLISH VIDEO
 async def publish_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -746,6 +852,8 @@ async def on_startup(app):
     cleanup_published()
     upload_queue = load_queue()
     await app.bot.delete_webhook(drop_pending_updates=True)
+    app.create_task(ab_test_worker())
+    app.create_task(analytics_report_worker())
     app.create_task(retry_worker())
 
 
@@ -821,6 +929,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
