@@ -29,6 +29,7 @@ ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")  # isi dengan chat id kamu
 QUEUE_FILE = "queue.json"
 LIMIT_FILE = "limit.json"
 PUBLISH_FILE = "publish_list.json"
+PRIME_STATS_FILE = "prime_stats.json"
 
 SCOPES = [
     "https://www.googleapis.com/auth/youtube",
@@ -92,7 +93,7 @@ def get_next_prime_time():
     tz = pytz.timezone("Asia/Jakarta")
     now = datetime.now(tz)
 
-    prime_hours = [12, 17, 20]
+    prime_hours = get_best_prime_hour()
     max_per_hour = 3
     max_per_day = 9
 
@@ -275,8 +276,6 @@ async def analytics_report_worker():
 
     while True:
         now = datetime.now(tz)
-
-        # kirim tiap jam 23:59 WIB
         target = now.replace(hour=23, minute=59, second=0)
 
         wait_seconds = (target - now).total_seconds()
@@ -285,10 +284,13 @@ async def analytics_report_worker():
 
         await asyncio.sleep(wait_seconds)
 
+        youtube = get_youtube_service()
+        creds = youtube._http.credentials
+
         youtube_analytics = build(
             "youtubeAnalytics",
             "v2",
-            credentials=get_youtube_service()._http.credentials
+            credentials=creds
         )
 
         yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
@@ -297,18 +299,26 @@ async def analytics_report_worker():
             ids="channel==MINE",
             startDate=yesterday,
             endDate=yesterday,
-            metrics="views,estimatedMinutesWatched,averageViewDuration,averageViewPercentage",
+            metrics="views,averageViewPercentage",
             dimensions="video"
         ).execute()
+
+        publish_list = load_publish_list()
 
         text = f"📊 REPORT {yesterday}\n\n"
 
         for row in report.get("rows", []):
             video_id = row[0]
             views = row[1]
-            avg_percent = row[4]
+            avg_percent = row[2]
 
-            text += f"{video_id}\nViews: {views}\nCTR Retention: {avg_percent}%\n\n"
+            text += f"{video_id}\nViews: {views}\nRetention: {avg_percent}%\n\n"
+
+            # Cari publish time video
+            for item in publish_list:
+                if item["video_id"] == video_id:
+                    publish_time = datetime.fromisoformat(item["publishAt"])
+                    update_prime_stats(video_id, avg_percent, publish_time)
 
         if ADMIN_CHAT_ID and BOT_APP:
             await BOT_APP.bot.send_message(ADMIN_CHAT_ID, text)
@@ -405,7 +415,43 @@ def cleanup_published():
 
     save_publish_list(new_data)
 
+# ==========================================================
+# PRIME STATS SYSTEM (AI LEARNING PRIME HOUR)
+# ==========================================================
+def load_prime_stats():
+    if os.path.exists(PRIME_STATS_FILE):
+        with open(PRIME_STATS_FILE, "r") as f:
+            return json.load(f)
+    return {"12": [], "17": [], "20": []}
 
+
+def save_prime_stats(data):
+    with open(PRIME_STATS_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+def get_best_prime_hour():
+    stats = load_prime_stats()
+
+    def avg(hour):
+        values = stats.get(str(hour), [])
+        return sum(values) / len(values) if values else 0
+
+    prime_hours = [12, 17, 20]
+    prime_hours.sort(key=lambda h: avg(h), reverse=True)
+
+    return prime_hours
+
+def update_prime_stats(video_id, ctr, publish_time):
+    tz = pytz.timezone("Asia/Jakarta")
+    hour = publish_time.astimezone(tz).hour
+
+    if hour not in [12, 17, 20]:
+        return
+
+    stats = load_prime_stats()
+    stats.setdefault(str(hour), []).append(float(ctr))
+    save_prime_stats(stats)
 # ==========================================================
 # YOUTUBE AUTH
 # ==========================================================
@@ -648,7 +694,7 @@ def _upload_sync(path, metadata):
 
 async def ab_test_worker():
     while True:
-        await asyncio.sleep(86400)  # 24 jam
+        await asyncio.sleep(86400)
 
         youtube = get_youtube_service()
         data = load_publish_list()
@@ -657,10 +703,15 @@ async def ab_test_worker():
             if not item.get("ab_test"):
                 continue
 
-            index = item["current_title_index"]
+            ctr_history = item.get("ctr_history", [])
             titles = item["titles"]
+            index = item["current_title_index"]
 
-            # kalau masih dalam 3 hari pertama
+            # Jika sudah ada retention bagus (>70%) stop test
+            if ctr_history and max(ctr_history) > 70:
+                item["ab_test"] = False
+                continue
+
             if index < len(titles) - 1:
                 new_index = index + 1
                 new_title = titles[new_index]
@@ -677,9 +728,7 @@ async def ab_test_worker():
                 ).execute()
 
                 item["current_title_index"] = new_index
-
             else:
-                # sudah selesai A/B
                 item["ab_test"] = False
 
         save_publish_list(data)
@@ -929,6 +978,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
