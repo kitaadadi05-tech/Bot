@@ -310,15 +310,21 @@ async def analytics_report_worker():
         for row in report.get("rows", []):
             video_id = row[0]
             views = row[1]
-            avg_percent = row[2]
+            avg_percent = float(row[2])
 
             text += f"{video_id}\nViews: {views}\nRetention: {avg_percent}%\n\n"
 
-            # Cari publish time video
+            # Cari video di publish_list
             for item in publish_list:
-                if item["video_id"] == video_id:
+                if item["video_id"] == video_id and item.get("ab_test"):
+
+                    # Simpan CTR history
+                    item.setdefault("ctr_history", []).append(avg_percent)
+
                     publish_time = datetime.fromisoformat(item["publishAt"])
                     update_prime_stats(video_id, avg_percent, publish_time)
+
+        save_publish_list(publish_list)
 
         if ADMIN_CHAT_ID and BOT_APP:
             await BOT_APP.bot.send_message(ADMIN_CHAT_ID, text)
@@ -708,7 +714,7 @@ def _upload_sync(path, metadata):
 
 async def ab_test_worker():
     while True:
-        await asyncio.sleep(86400)
+        await asyncio.sleep(86400)  # 24 jam
 
         youtube = get_youtube_service()
         data = load_publish_list()
@@ -717,15 +723,13 @@ async def ab_test_worker():
             if not item.get("ab_test"):
                 continue
 
+            titles = item.get("titles", [])
             ctr_history = item.get("ctr_history", [])
-            titles = item["titles"]
-            index = item["current_title_index"]
+            index = item.get("current_title_index", 0)
 
-            # Jika sudah ada retention bagus (>70%) stop test
-            if ctr_history and max(ctr_history) > 70:
-                item["ab_test"] = False
-                continue
-
+            # ==========================
+            # DAY 2 & 3 → ROTATE TITLE
+            # ==========================
             if index < len(titles) - 1:
                 new_index = index + 1
                 new_title = titles[new_index]
@@ -742,7 +746,29 @@ async def ab_test_worker():
                 ).execute()
 
                 item["current_title_index"] = new_index
+
+            # ==========================
+            # DAY 4 → PICK WINNER
+            # ==========================
             else:
+                if ctr_history:
+                    best_index = ctr_history.index(max(ctr_history))
+                    best_title = titles[best_index]
+
+                    youtube.videos().update(
+                        part="snippet",
+                        body={
+                            "id": item["video_id"],
+                            "snippet": {
+                                "title": best_title,
+                                "categoryId": "22"
+                            }
+                        }
+                    ).execute()
+
+                    item["current_title_index"] = best_index
+
+                # Stop A/B test
                 item["ab_test"] = False
 
         save_publish_list(data)
@@ -1017,6 +1043,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
