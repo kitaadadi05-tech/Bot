@@ -957,27 +957,53 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
 def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
-    # Commands dulu
+    # Handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("list", list_videos))
     app.add_handler(CommandHandler("publish", publish_video))
     app.add_handler(CommandHandler("delete", delete_video))
-
-    # Callback button handler
     app.add_handler(CallbackQueryHandler(button_handler))
-
-    # Message handler terakhir
     app.add_handler(MessageHandler(filters.VIDEO, handle_video))
 
     app.add_error_handler(error_handler)
-    app.post_init = on_startup
 
-    app.run_polling(drop_pending_updates=True,
-                    allowed_updates=Update.ALL_TYPES)
+    async def startup(app):
+        global upload_queue, BOT_APP
+        BOT_APP = app
+        cleanup_published()
+        upload_queue = load_queue()
 
+        await app.bot.delete_webhook(drop_pending_updates=True)
+
+        app.job_queue.run_repeating(
+            lambda ctx: asyncio.create_task(ab_test_worker()),
+            interval=86400,
+            first=5
+        )
+
+        app.job_queue.run_repeating(
+            lambda ctx: asyncio.create_task(analytics_report_worker()),
+            interval=86400,
+            first=10
+        )
+
+        app.job_queue.run_repeating(
+            lambda ctx: asyncio.create_task(retry_worker()),
+            interval=1800,
+            first=15
+        )
+
+    app.post_init = startup
+
+    app.run_polling(
+        drop_pending_updates=True,
+        allowed_updates=Update.ALL_TYPES,
+        close_loop=False
+    )
 
 if __name__ == "__main__":
     main()
+
 
 
 
