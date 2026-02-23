@@ -646,6 +646,7 @@ def _upload_sync(path, metadata):
 
     today = datetime.now(tz).date()
 
+    # Hitung slot hari ini
     today_count = 0
     for item in publish_list:
         item_time = datetime.fromisoformat(item["publishAt"]).astimezone(tz)
@@ -655,26 +656,32 @@ def _upload_sync(path, metadata):
     if today_count >= 3:
         raise Exception("Daily prime slot penuh (3/hari)")
 
-   if not metadata.get("titles"):
-    raise Exception("AI tidak menghasilkan title")
+    # ===== VALIDASI METADATA =====
+    if not metadata.get("titles"):
+        raise Exception("AI tidak menghasilkan title")
 
     if not metadata.get("description"):
-     raise Exception("AI tidak menghasilkan description")
-    
-   body = {
-    "snippet": {
-        "title": metadata["titles"][0],  # ✅ ambil title pertama
-        "description": metadata["description"],
-        "tags": metadata["hashtags"],
-        "categoryId": "22"
-    },
-    "status": {
-        "privacyStatus": "private",
-        "publishAt": publish_time_utc,
-        "selfDeclaredMadeForKids": False
+        raise Exception("AI tidak menghasilkan description")
+
+    title = metadata.get("titles", ["Untitled Video"])[0]
+    description = metadata.get("description", "")
+    hashtags = metadata.get("hashtags", [])
+
+    # ===== BODY YOUTUBE =====
+    body = {
+        "snippet": {
+            "title": title,
+            "description": description,
+            "tags": hashtags,
+            "categoryId": "22"
+        },
+        "status": {
+            "privacyStatus": "private",
+            "publishAt": publish_time_utc,
+            "selfDeclaredMadeForKids": False
+        }
     }
-}
-}
+
     media = MediaFileUpload(path, resumable=True)
 
     request = youtube.videos().insert(
@@ -684,7 +691,6 @@ def _upload_sync(path, metadata):
     )
 
     response = request.execute()
-
     video_id = response["id"]
 
     publish_list.append({
@@ -695,6 +701,7 @@ def _upload_sync(path, metadata):
         "ab_test": True,
         "ctr_history": []
     })
+
     save_publish_list(publish_list)
 
     return f"https://youtube.com/watch?v={video_id}"
@@ -1010,6 +1017,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
