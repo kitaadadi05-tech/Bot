@@ -1076,7 +1076,9 @@ def sync_scheduled_from_youtube():
 def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
-    # Handlers
+    # ==============================
+    # HANDLERS
+    # ==============================
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("list", list_videos))
     app.add_handler(CommandHandler("publish", publish_video))
@@ -1086,6 +1088,9 @@ def main():
 
     app.add_error_handler(error_handler)
 
+    # ==============================
+    # STARTUP FUNCTION
+    # ==============================
     async def startup(app):
         global upload_queue, BOT_APP
         BOT_APP = app
@@ -1094,16 +1099,19 @@ def main():
 
         await app.bot.delete_webhook(drop_pending_updates=True)
 
-         app.job_queue.run_daily(
-        analytics_report_worker,
-        time=time(hour=23, minute=59)
-        )
-    
+        # DAILY ANALYTICS 23:59 WIB
         app.job_queue.run_daily(
-        ab_test_worker,
-        time=time(hour=0, minute=5)
+            analytics_report_worker,
+            time=time(hour=23, minute=59)
         )
-        
+
+        # AB TEST ROTATION 00:05 WIB
+        app.job_queue.run_daily(
+            ab_test_worker,
+            time=time(hour=0, minute=5)
+        )
+
+        # RETRY QUEUE setiap 30 menit
         app.job_queue.run_repeating(
             retry_worker,
             interval=1800,
@@ -1114,12 +1122,12 @@ def main():
 
     app.run_polling(
         drop_pending_updates=True,
-        allowed_updates=Update.ALL_TYPES,
-        close_loop=False
+        allowed_updates=Update.ALL_TYPES
     )
 
 if __name__ == "__main__":
     main()
+
 
 
 
