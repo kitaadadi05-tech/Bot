@@ -900,6 +900,8 @@ async def on_startup(app):
     count = sync_scheduled_from_youtube()
     print(f"Synced {count} scheduled videos from YouTube")
     app.create_task(ab_test_worker())
+    count = sync_scheduled_from_youtube()
+    print(f"Synced {count} videos")
     app.create_task(analytics_report_worker())
     app.create_task(retry_worker())
 
@@ -1091,6 +1093,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
