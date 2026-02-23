@@ -271,60 +271,43 @@ async def show_list(query):
             raise e
 
 
-async def analytics_report_worker():
+async def analytics_report_worker(context: ContextTypes.DEFAULT_TYPE):
+
     tz = pytz.timezone("Asia/Jakarta")
+    youtube = get_youtube_service()
+    creds = youtube._http.credentials
 
-    while True:
-        now = datetime.now(tz)
-        target = now.replace(hour=23, minute=59, second=0)
+    youtube_analytics = build(
+        "youtubeAnalytics",
+        "v2",
+        credentials=creds
+    )
 
-        wait_seconds = (target - now).total_seconds()
-        if wait_seconds < 0:
-            wait_seconds += 86400
+    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
-        await asyncio.sleep(wait_seconds)
+    report = youtube_analytics.reports().query(
+        ids="channel==MINE",
+        startDate=yesterday,
+        endDate=yesterday,
+        metrics="views,averageViewPercentage",
+        dimensions="video"
+    ).execute()
 
-        youtube = get_youtube_service()
-        creds = youtube._http.credentials
+    publish_list = load_publish_list()
 
-        youtube_analytics = build(
-            "youtubeAnalytics",
-            "v2",
-            credentials=creds
-        )
+    for row in report.get("rows", []):
+        video_id = row[0]
+        avg_percent = float(row[2])
 
-        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        for item in publish_list:
+            if item["video_id"] == video_id and item.get("ab_test"):
 
-        report = youtube_analytics.reports().query(
-            ids="channel==MINE",
-            startDate=yesterday,
-            endDate=yesterday,
-            metrics="views,averageViewPercentage",
-            dimensions="video"
-        ).execute()
+                item.setdefault("ctr_history", []).append(avg_percent)
 
-        publish_list = load_publish_list()
+                publish_time = datetime.fromisoformat(item["publishAt"])
+                update_prime_stats(video_id, avg_percent, publish_time)
 
-        text = f"📊 REPORT {yesterday}\n\n"
-
-        for row in report.get("rows", []):
-            video_id = row[0]
-            views = row[1]
-            avg_percent = float(row[2])
-
-            text += f"{video_id}\nViews: {views}\nRetention: {avg_percent}%\n\n"
-
-            # Cari video di publish_list
-            for item in publish_list:
-                if item["video_id"] == video_id and item.get("ab_test"):
-
-                    # Simpan CTR history
-                    item.setdefault("ctr_history", []).append(avg_percent)
-
-                    publish_time = datetime.fromisoformat(item["publishAt"])
-                    update_prime_stats(video_id, avg_percent, publish_time)
-
-        save_publish_list(publish_list)
+    save_publish_list(publish_list)
 
         if ADMIN_CHAT_ID and BOT_APP:
             await BOT_APP.bot.send_message(ADMIN_CHAT_ID, text)
@@ -712,66 +695,65 @@ def _upload_sync(path, metadata):
 
     return f"https://youtube.com/watch?v={video_id}"
 
-async def ab_test_worker():
-    while True:
-        await asyncio.sleep(86400)  # 24 jam
+async def ab_test_worker(context: ContextTypes.DEFAULT_TYPE):
 
-        youtube = get_youtube_service()
-        data = load_publish_list()
+    youtube = get_youtube_service()
+    data = load_publish_list()
 
-        for item in data:
-            if not item.get("ab_test"):
-                continue
+    for item in data:
+        if not item.get("ab_test"):
+            continue
 
-            titles = item.get("titles", [])
-            ctr_history = item.get("ctr_history", [])
-            index = item.get("current_title_index", 0)
+        titles = item.get("titles", [])
+        ctr_history = item.get("ctr_history", [])
+        index = item.get("current_title_index", 0)
 
-            # ==========================
-            # DAY 2 & 3 → ROTATE TITLE
-            # ==========================
-            if index < len(titles) - 1:
-                new_index = index + 1
-                new_title = titles[new_index]
+        # =====================
+        # DAY 2 & 3 ROTATION
+        # =====================
+        if index < len(titles) - 1:
+
+            new_index = index + 1
+            new_title = titles[new_index]
+
+            youtube.videos().update(
+                part="snippet",
+                body={
+                    "id": item["video_id"],
+                    "snippet": {
+                        "title": new_title,
+                        "categoryId": "22"
+                    }
+                }
+            ).execute()
+
+            item["current_title_index"] = new_index
+
+        # =====================
+        # DAY 4 PICK WINNER
+        # =====================
+        else:
+            if ctr_history:
+
+                best_index = ctr_history.index(max(ctr_history))
+                best_title = titles[best_index]
 
                 youtube.videos().update(
                     part="snippet",
                     body={
                         "id": item["video_id"],
                         "snippet": {
-                            "title": new_title,
+                            "title": best_title,
                             "categoryId": "22"
                         }
                     }
                 ).execute()
 
-                item["current_title_index"] = new_index
+                item["current_title_index"] = best_index
 
-            # ==========================
-            # DAY 4 → PICK WINNER
-            # ==========================
-            else:
-                if ctr_history:
-                    best_index = ctr_history.index(max(ctr_history))
-                    best_title = titles[best_index]
+            item["ab_test"] = False
 
-                    youtube.videos().update(
-                        part="snippet",
-                        body={
-                            "id": item["video_id"],
-                            "snippet": {
-                                "title": best_title,
-                                "categoryId": "22"
-                            }
-                        }
-                    ).execute()
-
-                    item["current_title_index"] = best_index
-
-                # Stop A/B test
-                item["ab_test"] = False
-
-        save_publish_list(data)
+    save_publish_list(data)
 #==========================================================
 # PUBLISH VIDEO
 async def publish_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1015,22 +997,20 @@ def main():
 
         await app.bot.delete_webhook(drop_pending_updates=True)
 
-        app.job_queue.run_repeating(
-            lambda ctx: asyncio.create_task(ab_test_worker()),
-            interval=86400,
-            first=5
+        app.job_queue.run_daily(
+            analytics_report_worker,
+            time=datetime.time(hour=23, minute=59)
         )
-
-        app.job_queue.run_repeating(
-            lambda ctx: asyncio.create_task(analytics_report_worker()),
-            interval=86400,
-            first=10
+        
+        app.job_queue.run_daily(
+            ab_test_worker,
+            time=datetime.time(hour=0, minute=5)
         )
-
+        
         app.job_queue.run_repeating(
-            lambda ctx: asyncio.create_task(retry_worker()),
+            retry_worker,
             interval=1800,
-            first=15
+            first=30
         )
 
     app.post_init = startup
@@ -1043,6 +1023,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
