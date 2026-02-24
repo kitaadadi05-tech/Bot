@@ -317,7 +317,7 @@ async def analytics_report_worker(context: ContextTypes.DEFAULT_TYPE):
 
     publish_list = load_publish_list()
 
-   for row in report.get("rows", []):
+    for row in report.get("rows", []):
     video_id = row[0]
     views = row[1]
     avg_percent = float(row[2])
@@ -1078,6 +1078,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
