@@ -158,7 +158,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = ("🚀 *YouTube Shorts Automation PRO*\n\n"
             f"📊 Scheduled: {stats['total']}\n"
             f"🕒 Next Publish: {next_text}\n"
-            f"🔥 Slot Today: {stats['today_slots']}/3\n\n"
+            f"🔥 Slot Today: {stats['today_slots']}/9\n\n"
             "Kelola video di bawah 👇")
 
     keyboard = [[
@@ -216,7 +216,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "🚀 *YouTube Shorts Automation PRO*\n\n"
                 f"📊 Scheduled: {stats['total']}\n"
                 f"🕒 Next Publish: {next_text}\n"
-                f"🔥 Slot Today: {stats['today_slots']}/3\n\n"
+                f"🔥 Slot Today: {stats['today_slots']}/9\n\n"
                 "Kelola video di bawah 👇"
             )
 
@@ -317,20 +317,21 @@ async def analytics_report_worker(context: ContextTypes.DEFAULT_TYPE):
 
     publish_list = load_publish_list()
 
-    for row in report.get("rows", []):
-        video_id = row[0]
-        avg_percent = float(row[2])
+   for row in report.get("rows", []):
+    video_id = row[0]
+    views = row[1]
+    avg_percent = float(row[2])
 
-        for item in publish_list:
-            if item["video_id"] == video_id and item.get("ab_test"):
+    for item in publish_list:
+        if item["video_id"] == video_id and item.get("ab_test"):
 
-                item.setdefault("metrics_history", []).append({
-                    "views": views,
-                    "retention": avg_percent
-                })
+            item.setdefault("metrics_history", []).append({
+                "views": views,
+                "retention": avg_percent
+            })
 
-                publish_time = datetime.fromisoformat(item["publishAt"])
-                update_prime_stats(video_id, avg_percent, publish_time)
+            publish_time = datetime.fromisoformat(item["publishAt"])
+            update_prime_stats(video_id, avg_percent, publish_time)
 
     save_publish_list(publish_list)
 
@@ -572,7 +573,8 @@ async def list_videos(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         formatted_time = jakarta_time.strftime("%d %b %Y - %H:%M WIB")
 
-        text += f"{i}. {item['title']}\nPublish: {formatted_time}\n\n"
+        title = item["titles"][item.get("current_title_index", 0)]
+        text += f"{i}. {title}\nPublish: {formatted_time}\n\n"
 
     await update.message.reply_text(text)
 
@@ -587,23 +589,9 @@ async def upload_to_youtube(path, metadata):
 
 def _upload_sync(path, metadata):
 
-    tz = pytz.timezone("Asia/Jakarta")
     publish_time_utc = get_next_prime_time()
-
     youtube = get_youtube_service()
     publish_list = load_publish_list()
-
-    today = datetime.now(tz).date()
-
-    # Hitung slot hari ini
-    today_count = 0
-    for item in publish_list:
-        item_time = datetime.fromisoformat(item["publishAt"]).astimezone(tz)
-        if item_time.date() == today:
-            today_count += 1
-
-    if today_count >= 3:
-        raise Exception("Daily prime slot penuh (3/hari)")
 
     # ===== VALIDASI METADATA =====
     if not metadata.get("titles"):
@@ -612,11 +600,10 @@ def _upload_sync(path, metadata):
     if not metadata.get("description"):
         raise Exception("AI tidak menghasilkan description")
 
-    title = metadata.get("titles", ["Untitled Video"])[0]
-    description = metadata.get("description", "")
+    title = metadata["titles"][0]
+    description = metadata["description"]
     hashtags = metadata.get("hashtags", [])
 
-    # ===== BODY YOUTUBE =====
     body = {
         "snippet": {
             "title": title,
@@ -633,13 +620,12 @@ def _upload_sync(path, metadata):
 
     media = MediaFileUpload(path, resumable=True)
 
-    request = youtube.videos().insert(
+    response = youtube.videos().insert(
         part="snippet,status",
         body=body,
         media_body=media
-    )
+    ).execute()
 
-    response = request.execute()
     video_id = response["id"]
 
     publish_list.append({
@@ -648,7 +634,7 @@ def _upload_sync(path, metadata):
         "current_title_index": 0,
         "publishAt": publish_time_utc,
         "ab_test": True,
-        "ctr_history": []
+        "metrics_history": []
     })
 
     save_publish_list(publish_list)
@@ -788,8 +774,6 @@ async def delete_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==========================================================
 async def retry_worker(context: ContextTypes.DEFAULT_TYPE):
     global upload_limit_reached
-    while True:
-        await asyncio.sleep(1800)
         if upload_limit_reached and can_retry() and upload_queue:
             logging.info("Retrying queue...")
             new_queue = []
@@ -970,7 +954,6 @@ def sync_scheduled_from_youtube():
     youtube = get_youtube_service()
     tz = pytz.timezone("Asia/Jakarta")
 
-    # Ambil uploads playlist
     channel = youtube.channels().list(
         part="contentDetails",
         mine=True
@@ -981,6 +964,9 @@ def sync_scheduled_from_youtube():
     new_publish_list = []
     next_page_token = None
 
+    # =============================
+    # LOOP SEMUA PAGE DULU
+    # =============================
     while True:
         playlist = youtube.playlistItems().list(
             part="snippet",
@@ -1007,10 +993,6 @@ def sync_scheduled_from_youtube():
             publish_at = status.get("publishAt")
 
             if publish_at:
-                publish_time = datetime.fromisoformat(
-                    publish_at.replace("Z", "+00:00")
-                )
-
                 new_publish_list.append({
                     "video_id": video_id,
                     "titles": [snippet.get("title", "")],
@@ -1024,18 +1006,21 @@ def sync_scheduled_from_youtube():
         if not next_page_token:
             break
 
-        existing = load_publish_list()
-        
-        merged = {item["video_id"]: item for item in existing}
-        
-        for item in new_publish_list:
-            merged[item["video_id"]] = item
-        
-        final_list = list(merged.values())
-        
-        save_publish_list(final_list)
-        
-        return len(final_list)
+    # =============================
+    # MERGE SETELAH LOOP SELESAI
+    # =============================
+    existing = load_publish_list()
+
+    merged = {item["video_id"]: item for item in existing}
+
+    for item in new_publish_list:
+        merged[item["video_id"]] = item
+
+    final_list = list(merged.values())
+
+    save_publish_list(final_list)
+
+    return len(final_list)
 # ==========================================================
 # MAIN
 # ==========================================================
@@ -1093,6 +1078,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
