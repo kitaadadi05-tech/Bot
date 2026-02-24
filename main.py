@@ -774,33 +774,43 @@ async def delete_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==========================================================
 async def retry_worker(context: ContextTypes.DEFAULT_TYPE):
     global upload_limit_reached
-        if upload_limit_reached and can_retry() and upload_queue:
-            logging.info("Retrying queue...")
-            new_queue = []
-            for item in upload_queue:
-                try:
-                    url = await upload_to_youtube(item["file_path"],
-                                                  item["metadata"])
-                    if ADMIN_CHAT_ID and BOT_APP:
-                        await BOT_APP.bot.send_message(
-                            chat_id=ADMIN_CHAT_ID,
-                            text=f"✅ Retry sukses!\n{url}")
-                    os.remove(item["file_path"])
-                except HttpError as e:
-                    if "uploadLimitExceeded" in str(e):
-                        save_limit_time()
-                        new_queue.append(item)
-                        break
-                    else:
-                        new_queue.append(item)
-                except Exception:
-                    new_queue.append(item)
-            upload_queue.clear()
-            upload_queue.extend(new_queue)
-            save_queue(upload_queue)
-            if not upload_queue:
-                upload_limit_reached = False
 
+    if upload_limit_reached and can_retry() and upload_queue:
+        logging.info("Retrying queue...")
+        new_queue = []
+
+        for item in upload_queue:
+            try:
+                url = await upload_to_youtube(
+                    item["file_path"],
+                    item["metadata"]
+                )
+
+                if ADMIN_CHAT_ID and BOT_APP:
+                    await BOT_APP.bot.send_message(
+                        chat_id=ADMIN_CHAT_ID,
+                        text=f"✅ Retry sukses!\n{url}"
+                    )
+
+                os.remove(item["file_path"])
+
+            except HttpError as e:
+                if "uploadLimitExceeded" in str(e):
+                    save_limit_time()
+                    new_queue.append(item)
+                    break
+                else:
+                    new_queue.append(item)
+
+            except Exception:
+                new_queue.append(item)
+
+        upload_queue.clear()
+        upload_queue.extend(new_queue)
+        save_queue(upload_queue)
+
+        if not upload_queue:
+            upload_limit_reached = False
 
 # ==========================================================
 # VIDEO HANDLER
@@ -1078,6 +1088,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
