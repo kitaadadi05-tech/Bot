@@ -837,17 +837,41 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global upload_limit_reached
 
     message = update.message
-    video = message.video
 
-    if not video:
+    video = None
+    file_size = None
+    duration = 0
+
+    # ===============================
+    # DETEKSI VIDEO ATAU DOCUMENT
+    # ===============================
+    if message.video:
+        video = message.video
+        file_size = video.file_size
+        duration = video.duration
+
+    elif message.document and message.document.mime_type.startswith("video"):
+        video = message.document
+        file_size = video.file_size
+        duration = 0  # document tidak selalu punya duration
+
+    else:
         return
-    is_short = video.duration <= 60
-    #if video.duration > 60:
-        #await message.reply_text("❌ Max 60 seconds.")
-        #return
 
-    caption = message.caption or "Amazing Short"
-    
+    is_short = duration <= 60 if duration else False
+
+    caption = message.caption or "Amazing Video"
+
+    MAX_FILE_SIZE = 49 * 1024 * 1024  # 49MB safe
+
+    if file_size and file_size > MAX_FILE_SIZE:
+        await message.reply_text(
+            "❌ File terlalu besar.\n\n"
+            "🔹 Maksimal ±50MB via Telegram Bot.\n"
+            "🔹 Gunakan kompresi atau kirim via link."
+        )
+        return
+
     status_msg = await message.reply_text("⬇️ Downloading...")
 
     file = await context.bot.get_file(video.file_id)
@@ -894,12 +918,12 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         upload_queue.append({
             "file_path": temp_path,
             "metadata": metadata,
-             "is_short": is_short
+            "is_short": is_short
         })
         save_queue(upload_queue)
 
         await status_msg.edit_text(
-            f"⚠️ Slot hari ini penuh / sistem delay.\n"
+            f"⚠️ Sistem delay / slot penuh.\n"
             f"Video masuk queue.\n\nReason: {str(e)}"
         )
 # ==========================================================
@@ -1080,7 +1104,12 @@ def main():
     app.add_handler(CommandHandler("publish", publish_video))
     app.add_handler(CommandHandler("delete", delete_video))
     app.add_handler(CallbackQueryHandler(button_handler))
-    app.add_handler(MessageHandler(filters.VIDEO, handle_video))
+    app.add_handler(
+        MessageHandler(
+            filters.VIDEO | filters.Document.VIDEO,
+            handle_video
+        )
+    )
 
     app.add_error_handler(error_handler)
 
@@ -1123,6 +1152,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
