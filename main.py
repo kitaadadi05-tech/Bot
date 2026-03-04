@@ -895,6 +895,7 @@ async def retry_worker(context: ContextTypes.DEFAULT_TYPE):
 
         if not upload_queue:
             upload_limit_reached = False
+
 async def handle_drive_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     message = update.message
@@ -903,28 +904,50 @@ async def handle_drive_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if "drive.google.com" not in text:
         return
 
-    file_id = extract_drive_file_id(text)
+    # ==============================
+    # SPLIT BARIS
+    # ==============================
+    lines = text.split("\n")
 
-    if not file_id:
+    drive_url = None
+    keyword_lines = []
+
+    for line in lines:
+        if "drive.google.com" in line:
+            drive_url = line.strip()
+        else:
+            if line.strip():
+                keyword_lines.append(line.strip())
+
+    if not drive_url:
         await message.reply_text("❌ Invalid Google Drive link.")
         return
+
+    file_id = extract_drive_file_id(drive_url)
+
+    if not file_id:
+        await message.reply_text("❌ Tidak bisa membaca file ID.")
+        return
+
+    # ==============================
+    # KEYWORD
+    # ==============================
+    keyword = " ".join(keyword_lines) if keyword_lines else "Amazing Facts"
 
     status_msg = await message.reply_text("⬇️ Downloading from Drive...")
 
     try:
         temp_path = await download_drive_file_api(file_id)
 
-        # ✅ DETECT DURASI
         duration = get_video_duration(temp_path)
         is_short = duration <= 60
-        
-        await status_msg.edit_text("🤖 Generating metadata...")
-        metadata = await generate_viral_metadata("Drive Upload")
-        
-        await status_msg.edit_text("🚀 Uploading to YouTube...")
 
-        # AUTO DETECT SHORT / LONG
-        is_short = False
+        await status_msg.edit_text("🤖 Generating metadata...")
+
+        # 🔥 PAKAI KEYWORD USER
+        metadata = await generate_viral_metadata(keyword)
+
+        await status_msg.edit_text("🚀 Uploading to YouTube...")
 
         url = await upload_to_youtube(temp_path, metadata, is_short)
 
@@ -933,9 +956,6 @@ async def handle_drive_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         os.remove(temp_path)
-
-    except HttpError as e:
-        await status_msg.edit_text(f"❌ YouTube Error:\n{e}")
 
     except Exception as e:
         await status_msg.edit_text(f"❌ Error:\n{str(e)}")
@@ -1263,6 +1283,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
