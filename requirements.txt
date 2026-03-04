@@ -9,6 +9,7 @@ opencv-python-headless==4.9.0.80
 scikit-learn
 telegram
 pytz
-
-
-
+google-api-python-client
+google-auth
+google-auth-httplib2
+google-auth-oauthlib
