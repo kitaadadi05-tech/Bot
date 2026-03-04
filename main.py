@@ -37,11 +37,21 @@ PRIME_STATS_FILE = "prime_stats.json"
 # ==========================
 DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive"]
 
-drive_credentials = service_account.Credentials.from_service_account_file(
-    "drive_service.json",
-    scopes=DRIVE_SCOPES
+import base64
+
+drive_base64 = os.getenv("DRIVE_SERVICE_BASE64")
+
+if not drive_base64:
+    raise Exception("DRIVE_SERVICE_BASE64 not set")
+
+drive_info = json.loads(
+    base64.b64decode(drive_base64)
 )
 
+drive_credentials = service_account.Credentials.from_service_account_info(
+    drive_info,
+    scopes=DRIVE_SCOPES
+)
 drive_service = build("drive", "v3", credentials=drive_credentials)
 
 # ==========================
@@ -1283,6 +1293,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
