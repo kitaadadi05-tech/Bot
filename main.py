@@ -18,7 +18,9 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from googleapiclient.errors import HttpError
-
+from google.oauth2 import service_account
+from googleapiclient.http import MediaIoBaseDownload
+import io
 # ==========================================================
 # CONFIG
 # ==========================================================
@@ -30,8 +32,22 @@ QUEUE_FILE = "queue.json"
 LIMIT_FILE = "limit.json"
 PUBLISH_FILE = "publish_list.json"
 PRIME_STATS_FILE = "prime_stats.json"
+# ==========================
+# GOOGLE DRIVE CONFIG
+# ==========================
+DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive"]
 
-SCOPES = [
+drive_credentials = service_account.Credentials.from_service_account_file(
+    "drive_service.json",
+    scopes=DRIVE_SCOPES
+)
+
+drive_service = build("drive", "v3", credentials=drive_credentials)
+
+# ==========================
+# YOUTUBE CONFIG
+# ==========================
+YOUTUBE_SCOPES = [
     "https://www.googleapis.com/auth/youtube",
     "https://www.googleapis.com/auth/yt-analytics.readonly"
 ]
@@ -49,13 +65,46 @@ BOT_APP = None
 # ==========================================================
 # QUEUE SYSTEM
 # ==========================================================
+import re
+
+def extract_drive_file_id(url: str):
+    patterns = [
+        r"/file/d/([a-zA-Z0-9_-]+)",
+        r"id=([a-zA-Z0-9_-]+)"
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+
+    return None
 def load_queue():
     if os.path.exists(QUEUE_FILE):
         with open(QUEUE_FILE, "r") as f:
             return json.load(f)
     return []
 
+import tempfile
+import os
 
+async def download_drive_file_api(file_id: str):
+
+    request = drive_service.files().get_media(fileId=file_id)
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
+        temp_path = tmp.name
+
+        downloader = MediaIoBaseDownload(tmp, request)
+
+        done = False
+        while not done:
+            status, done = downloader.next_chunk()
+            if status:
+                print(f"Download {int(status.progress() * 100)}%")
+
+    return temp_path
+    
 def save_queue(queue):
     with open(QUEUE_FILE, "w") as f:
         json.dump(queue, f)
@@ -311,7 +360,21 @@ async def show_list(query):
         else:
             raise e
 
+import subprocess
+import json
 
+def get_video_duration(path):
+    cmd = [
+        "ffprobe",
+        "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "json",
+        path
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    data = json.loads(result.stdout)
+    return float(data["format"]["duration"])
+    
 async def analytics_report_worker(context: ContextTypes.DEFAULT_TYPE):
 
     tz = pytz.timezone("Asia/Jakarta")
@@ -340,15 +403,15 @@ async def analytics_report_worker(context: ContextTypes.DEFAULT_TYPE):
         views = row[1]
         avg_percent = float(row[2])
 
-    for item in publish_list:
-        if item["video_id"] == video_id and item.get("ab_test"):
-            item.setdefault("metrics_history", []).append({
-                "views": views,
-                "retention": avg_percent
-            })
-
-            publish_time = datetime.fromisoformat(item["publishAt"])
-            update_prime_stats(video_id, avg_percent, publish_time)
+        for item in publish_list:
+            if item["video_id"] == video_id and item.get("ab_test"):
+                item.setdefault("metrics_history", []).append({
+                    "views": views,
+                    "retention": avg_percent
+                })
+    
+                publish_time = datetime.fromisoformat(item["publishAt"])
+                update_prime_stats(video_id, avg_percent, publish_time)
 
     save_publish_list(publish_list)
     summary = f"📊 Analytics Updated\nVideos checked: {len(report.get('rows', []))}"
@@ -487,7 +550,10 @@ def get_youtube_service():
         raise Exception("token.json tidak ditemukan. Generate di local dulu.")
 
     with open(TOKEN_FILE, "r") as f:
-        creds = Credentials.from_authorized_user_info(json.load(f), SCOPES)
+        creds = Credentials.from_authorized_user_info(
+            json.load(f),
+            YOUTUBE_SCOPES
+        )
 
     if creds.expired and creds.refresh_token:
         creds.refresh(Request())
@@ -829,7 +895,50 @@ async def retry_worker(context: ContextTypes.DEFAULT_TYPE):
 
         if not upload_queue:
             upload_limit_reached = False
+async def handle_drive_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
+    message = update.message
+    text = message.text.strip()
+
+    if "drive.google.com" not in text:
+        return
+
+    file_id = extract_drive_file_id(text)
+
+    if not file_id:
+        await message.reply_text("❌ Invalid Google Drive link.")
+        return
+
+    status_msg = await message.reply_text("⬇️ Downloading from Drive...")
+
+    try:
+        temp_path = await download_drive_file_api(file_id)
+
+        # ✅ DETECT DURASI
+        duration = get_video_duration(temp_path)
+        is_short = duration <= 60
+        
+        await status_msg.edit_text("🤖 Generating metadata...")
+        metadata = await generate_viral_metadata("Drive Upload")
+        
+        await status_msg.edit_text("🚀 Uploading to YouTube...")
+
+        # AUTO DETECT SHORT / LONG
+        is_short = False
+
+        url = await upload_to_youtube(temp_path, metadata, is_short)
+
+        await status_msg.edit_text(
+            f"✅ Uploaded & Scheduled!\n{url}"
+        )
+
+        os.remove(temp_path)
+
+    except HttpError as e:
+        await status_msg.edit_text(f"❌ YouTube Error:\n{e}")
+
+    except Exception as e:
+        await status_msg.edit_text(f"❌ Error:\n{str(e)}")
 # ==========================================================
 # VIDEO HANDLER
 # ==========================================================
@@ -840,35 +949,25 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     video = None
     file_size = None
-    duration = 0
 
-    # ===============================
-    # DETEKSI VIDEO ATAU DOCUMENT
-    # ===============================
     if message.video:
         video = message.video
         file_size = video.file_size
-        duration = video.duration
 
     elif message.document and message.document.mime_type.startswith("video"):
         video = message.document
         file_size = video.file_size
-        duration = 0  # document tidak selalu punya duration
 
     else:
         return
 
-    is_short = duration <= 60 if duration else False
-
-    caption = message.caption or "Amazing Video"
-
-    MAX_FILE_SIZE = 49 * 1024 * 1024  # 49MB safe
+    MAX_FILE_SIZE = 49 * 1024 * 1024
 
     if file_size and file_size > MAX_FILE_SIZE:
         await message.reply_text(
             "❌ File terlalu besar.\n\n"
             "🔹 Maksimal ±50MB via Telegram Bot.\n"
-            "🔹 Gunakan kompresi atau kirim via link."
+            "🔹 Gunakan Google Drive link."
         )
         return
 
@@ -879,6 +978,12 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
         temp_path = tmp.name
         await file.download_to_drive(temp_path)
+
+    # ✅ BARU CEK DURASI DI SINI
+    duration = get_video_duration(temp_path)
+    is_short = duration <= 60
+
+    caption = message.caption or "Amazing Video"
 
     await status_msg.edit_text("🤖 Generating metadata...")
     metadata = await generate_viral_metadata(caption)
@@ -1105,6 +1210,12 @@ def main():
     app.add_handler(CommandHandler("delete", delete_video))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(
+    MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            handle_drive_link
+        )
+    )
+    app.add_handler(
         MessageHandler(
             filters.VIDEO | filters.Document.VIDEO,
             handle_video
@@ -1152,6 +1263,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
