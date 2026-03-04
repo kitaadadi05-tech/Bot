@@ -89,60 +89,80 @@ def save_publish_list(data):
 
 #============================================================
 # PRIME TIME CHECKER
-def get_next_prime_time():
+def get_next_short_prime_time():
     tz = pytz.timezone("Asia/Jakarta")
     now = datetime.now(tz)
 
-    prime_hours = get_best_prime_hour()
-    max_per_hour = 3
-    max_per_day = 9
+    return _find_slot(
+        now,
+        prime_hours=[12, 17, 20],
+        max_per_hour=3,
+        max_per_day=9,
+        video_type="short"
+    )
 
+
+def get_next_long_prime_time():
+    tz = pytz.timezone("Asia/Jakarta")
+    now = datetime.now(tz)
+
+    return _find_slot(
+        now,
+        prime_hours=[19, 21],
+        max_per_hour=1,
+        max_per_day=2,
+        video_type="long"
+    )
+
+
+def _find_slot(now, prime_hours, max_per_hour, max_per_day, video_type):
+    tz = pytz.timezone("Asia/Jakarta")
     publish_list = load_publish_list()
 
-    # cek 7 hari ke depan
     for day_offset in range(7):
         check_day = now + timedelta(days=day_offset)
         date_only = check_day.date()
 
-        # ambil semua publish di hari tersebut
         day_videos = []
+
         for item in publish_list:
-            publish_time = datetime.fromisoformat(item["publishAt"]).astimezone(tz)
+            # 🔥 FILTER BERDASARKAN TYPE
+            if item.get("type", "short") != video_type:
+                continue
+
+            publish_time = datetime.fromisoformat(
+                item["publishAt"]
+            ).astimezone(tz)
+
             if publish_time.date() == date_only:
                 day_videos.append(publish_time)
 
-        # kalau sudah 9 → skip ke hari berikutnya
+        # 🔥 LIMIT PER HARI (PER TYPE)
         if len(day_videos) >= max_per_day:
             continue
 
-        # hitung slot per jam
         hour_count = {h: 0 for h in prime_hours}
+
         for publish_time in day_videos:
             if publish_time.hour in hour_count:
                 hour_count[publish_time.hour] += 1
 
-        # cari jam yang belum penuh
         for hour in prime_hours:
             if hour_count[hour] < max_per_hour:
 
-                # random minute + second biar natural
-                random_minute = random.randint(5, 55)
-                random_second = random.randint(0, 59)
-
                 candidate = check_day.replace(
                     hour=hour,
-                    minute=random_minute,
-                    second=random_second,
+                    minute=random.randint(5, 55),
+                    second=random.randint(0, 59),
                     microsecond=0
                 )
 
-                # jangan ambil waktu yang sudah lewat
                 if candidate <= now:
                     continue
 
                 return candidate.astimezone(pytz.utc).isoformat()
 
-    # fallback (harusnya jarang kejadian)
+    # 🔥 FALLBACK
     fallback = now + timedelta(days=1)
     return fallback.astimezone(pytz.utc).isoformat()
 #============================================================
@@ -155,11 +175,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if stats["next_publish"]:
         next_text = stats["next_publish"].strftime("%d %b %Y - %H:%M WIB")
 
-    text = ("🚀 *YouTube Shorts Automation PRO*\n\n"
-            f"📊 Scheduled: {stats['total']}\n"
+    text = (
+            "🚀 *YouTube Automation PRO*\n\n"
+            f"📱 Shorts: {stats['short_total']} ({stats['short_today']} today)\n"
+            f"📺 Long: {stats['long_total']} ({stats['long_today']} today)\n\n"
             f"🕒 Next Publish: {next_text}\n"
-            f"🔥 Slot Today: {stats['today_slots']}/9\n\n"
-            "Kelola video di bawah 👇")
+        )
 
     keyboard = [[
         InlineKeyboardButton("📅 Manage Videos", callback_data="list")
@@ -213,11 +234,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 next_text = stats["next_publish"].strftime("%d %b %Y - %H:%M WIB")
 
             text = (
-                "🚀 *YouTube Shorts Automation PRO*\n\n"
-                f"📊 Scheduled: {stats['total']}\n"
+                "🚀 *YouTube Automation PRO*\n\n"
+                f"📱 Shorts: {stats['short_total']} ({stats['short_today']} today)\n"
+                f"📺 Long: {stats['long_total']} ({stats['long_today']} today)\n\n"
                 f"🕒 Next Publish: {next_text}\n"
-                f"🔥 Slot Today: {stats['today_slots']}/9\n\n"
-                "Kelola video di bawah 👇"
             )
 
             keyboard = [
@@ -303,8 +323,6 @@ async def analytics_report_worker(context: ContextTypes.DEFAULT_TYPE):
         "v2",
         credentials=creds
     )
-    views = row[1]
-    avg_percent = float(row[2])
     yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
     report = youtube_analytics.reports().query(
@@ -324,7 +342,6 @@ async def analytics_report_worker(context: ContextTypes.DEFAULT_TYPE):
 
     for item in publish_list:
         if item["video_id"] == video_id and item.get("ab_test"):
-
             item.setdefault("metrics_history", []).append({
                 "views": views,
                 "retention": avg_percent
@@ -334,9 +351,12 @@ async def analytics_report_worker(context: ContextTypes.DEFAULT_TYPE):
             update_prime_stats(video_id, avg_percent, publish_time)
 
     save_publish_list(publish_list)
-
+    summary = f"📊 Analytics Updated\nVideos checked: {len(report.get('rows', []))}"
     if ADMIN_CHAT_ID and BOT_APP:
-        await BOT_APP.bot.send_message(ADMIN_CHAT_ID, text)
+        await BOT_APP.bot.send_message(
+            ADMIN_CHAT_ID,
+            summary
+        )
 #==========================================================
 # Publish from button
 #==========================================================
@@ -443,19 +463,6 @@ def load_prime_stats():
 def save_prime_stats(data):
     with open(PRIME_STATS_FILE, "w") as f:
         json.dump(data, f, indent=2)
-
-
-def get_best_prime_hour():
-    stats = load_prime_stats()
-
-    def avg(hour):
-        values = stats.get(str(hour), [])
-        return sum(values) / len(values) if values else 0
-
-    prime_hours = [12, 17, 20]
-    prime_hours.sort(key=lambda h: avg(h), reverse=True)
-
-    return prime_hours
 
 def update_prime_stats(video_id, ctr, publish_time):
     tz = pytz.timezone("Asia/Jakarta")
@@ -582,14 +589,23 @@ async def list_videos(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==========================================================
 # UPLOAD
 # ==========================================================
-async def upload_to_youtube(path, metadata):
+async def upload_to_youtube(path, metadata, is_short):
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, _upload_sync, path, metadata)
+    return await loop.run_in_executor(
+        None,
+        _upload_sync,
+        path,
+        metadata,
+        is_short
+    )
 
 
-def _upload_sync(path, metadata):
+def _upload_sync(path, metadata, is_short):
 
-    publish_time_utc = get_next_prime_time()
+    if is_short:
+        publish_time_utc = get_next_short_prime_time()
+    else:
+        publish_time_utc = get_next_long_prime_time()
     youtube = get_youtube_service()
     publish_list = load_publish_list()
 
@@ -630,10 +646,11 @@ def _upload_sync(path, metadata):
 
     publish_list.append({
         "video_id": video_id,
+        "type": "short" if is_short else "long",
         "titles": metadata["titles"],
         "current_title_index": 0,
         "publishAt": publish_time_utc,
-        "ab_test": True,
+        "ab_test": True if is_short else False,
         "metrics_history": []
     })
 
@@ -783,7 +800,8 @@ async def retry_worker(context: ContextTypes.DEFAULT_TYPE):
             try:
                 url = await upload_to_youtube(
                     item["file_path"],
-                    item["metadata"]
+                    item["metadata"],
+                    item["is_short"]
                 )
 
                 if ADMIN_CHAT_ID and BOT_APP:
@@ -823,13 +841,13 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not video:
         return
-
-    if video.duration > 60:
-        await message.reply_text("❌ Max 60 seconds.")
-        return
+    is_short = video.duration <= 60
+    #if video.duration > 60:
+        #await message.reply_text("❌ Max 60 seconds.")
+        #return
 
     caption = message.caption or "Amazing Short"
-
+    
     status_msg = await message.reply_text("⬇️ Downloading...")
 
     file = await context.bot.get_file(video.file_id)
@@ -844,7 +862,7 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await status_msg.edit_text("🚀 Uploading to YouTube...")
 
     try:
-        url = await upload_to_youtube(temp_path, metadata)
+        url = await upload_to_youtube(temp_path, metadata, is_short)
 
         await status_msg.edit_text(
             f"✅ Uploaded & Scheduled!\n{url}"
@@ -859,7 +877,8 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             upload_queue.append({
                 "file_path": temp_path,
-                "metadata": metadata
+                "metadata": metadata,
+                "is_short": is_short
             })
             save_queue(upload_queue)
 
@@ -874,7 +893,8 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         upload_queue.append({
             "file_path": temp_path,
-            "metadata": metadata
+            "metadata": metadata,
+             "is_short": is_short
         })
         save_queue(upload_queue)
 
@@ -907,29 +927,43 @@ def get_dashboard_stats():
     cleanup_published()
     data = load_publish_list()
 
-    total = len(data)
-
     tz = pytz.timezone("Asia/Jakarta")
     now = datetime.now(tz)
 
-    today_slots = 0
+    short_count = 0
+    long_count = 0
+
+    short_today = 0
+    long_today = 0
+
     next_publish = None
 
     for item in data:
-        publish_time = datetime.fromisoformat(item["publishAt"]).astimezone(tz)
+        publish_time = datetime.fromisoformat(
+            item["publishAt"]
+        ).astimezone(tz)
 
-        if publish_time.date() == now.date():
-            today_slots += 1
+        video_type = item.get("type", "short")
+
+        if video_type == "short":
+            short_count += 1
+            if publish_time.date() == now.date():
+                short_today += 1
+        else:
+            long_count += 1
+            if publish_time.date() == now.date():
+                long_today += 1
 
         if not next_publish or publish_time < next_publish:
             next_publish = publish_time
 
     return {
-        "total": total,
-        "today_slots": today_slots,
+        "short_total": short_count,
+        "long_total": long_count,
+        "short_today": short_today,
+        "long_today": long_today,
         "next_publish": next_publish
     }
-
 
 # ==========================================================
 # ERROR HANDLER
@@ -1005,6 +1039,7 @@ def sync_scheduled_from_youtube():
             if publish_at:
                 new_publish_list.append({
                     "video_id": video_id,
+                    "type": "short" if snippet.get("title","").lower().find("#shorts") != -1 else "long",
                     "titles": [snippet.get("title", "")],
                     "current_title_index": 0,
                     "publishAt": publish_at,
@@ -1088,6 +1123,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
