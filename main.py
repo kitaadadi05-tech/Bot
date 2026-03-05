@@ -1224,7 +1224,8 @@ def get_dashboard_stats():
                 long_today += 1
 
         if not next_publish or publish_time < next_publish:
-
+            next_publish = publish_time
+            
     return {
         "short_total": short_count,
         "long_total": long_count,
@@ -1402,6 +1403,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
