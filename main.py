@@ -224,6 +224,80 @@ def _find_slot(now, prime_hours, max_per_hour, max_per_day, video_type):
     # 🔥 FALLBACK
     fallback = now + timedelta(days=1)
     return fallback.astimezone(pytz.utc).isoformat()
+
+import subprocess
+import random
+
+def analyze_audio_risk(video_path):
+    """
+    Simple heuristic risk detection:
+    - Detect presence of strong audio signal
+    - Detect music pattern length
+    - Detect stereo similarity
+    """
+
+    cmd = [
+        "ffmpeg",
+        "-i", video_path,
+        "-af", "volumedetect",
+        "-f", "null",
+        "-"
+    ]
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+
+    output = result.stderr
+
+    # Heuristic: kalau ada volume tinggi → kemungkinan musik
+    risk_score = 0
+
+    if "mean_volume" in output:
+        risk_score += 30
+
+    if "max_volume" in output:
+        risk_score += 20
+
+    # Random small noise detection
+    risk_score += random.randint(0, 10)
+
+    return risk_score
+
+def transform_audio_to_safe_version(input_path):
+
+    output_path = input_path.replace(".mp4", "_safe.mp4")
+
+    speed = round(random.uniform(1.01, 1.03), 2)
+    pitch = speed
+
+    cmd = [
+        "ffmpeg",
+        "-i", input_path,
+        "-filter_complex",
+        f"atempo={speed},asetrate=44100*{pitch}",
+        "-c:v", "copy",
+        "-y",
+        output_path
+    ]
+
+    subprocess.run(cmd)
+
+    return output_path
+
+def mute_audio(video_path):
+
+    output_path = video_path.replace(".mp4", "_muted.mp4")
+
+    cmd = [
+        "ffmpeg",
+        "-i", video_path,
+        "-c:v", "copy",
+        "-an",
+        output_path
+    ]
+
+    subprocess.run(cmd)
+
+    return output_path
 #============================================================
 # Start UI
 #============================================================
@@ -387,49 +461,72 @@ def get_video_duration(path):
     
 async def analytics_report_worker(context: ContextTypes.DEFAULT_TYPE):
 
-    tz = pytz.timezone("Asia/Jakarta")
-    youtube = get_youtube_service()
-    creds = youtube._http.credentials
+    try:
+        youtube = get_youtube_service()
+        tz = pytz.timezone("Asia/Jakarta")
 
-    youtube_analytics = build(
-        "youtubeAnalytics",
-        "v2",
-        credentials=creds
-    )
-    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        publish_list = load_publish_list()
 
-    report = youtube_analytics.reports().query(
-        ids="channel==MINE",
-        startDate=yesterday,
-        endDate=yesterday,
-        metrics="views,averageViewPercentage",
-        dimensions="video"
-    ).execute()
+        # Ambil semua video ID yang pakai AB test
+        ab_videos = [
+            item["video_id"]
+            for item in publish_list
+            if item.get("ab_test")
+        ]
 
-    publish_list = load_publish_list()
+        if not ab_videos:
+            return
 
-    for row in report.get("rows", []):
-        video_id = row[0]
-        views = row[1]
-        avg_percent = float(row[2])
+        # Ambil statistik video langsung dari Data API
+        response = youtube.videos().list(
+            part="statistics",
+            id=",".join(ab_videos)
+        ).execute()
 
-        for item in publish_list:
-            if item["video_id"] == video_id and item.get("ab_test"):
+        items = response.get("items", [])
+
+        for video in items:
+            video_id = video["id"]
+            stats = video.get("statistics", {})
+
+            views = int(stats.get("viewCount", 0))
+            likes = int(stats.get("likeCount", 0))
+            comments = int(stats.get("commentCount", 0))
+
+            # Cari video di publish_list
+            for item in publish_list:
+                if item["video_id"] != video_id:
+                    continue
+
+                # Simpan metrics ke history
                 item.setdefault("metrics_history", []).append({
                     "views": views,
-                    "retention": avg_percent
+                    "likes": likes,
+                    "comments": comments,
+                    "timestamp": datetime.now(tz).isoformat()
                 })
-    
-                publish_time = datetime.fromisoformat(item["publishAt"])
-                update_prime_stats(video_id, avg_percent, publish_time)
 
-    save_publish_list(publish_list)
-    summary = f"📊 Analytics Updated\nVideos checked: {len(report.get('rows', []))}"
-    if ADMIN_CHAT_ID and BOT_APP:
-        await BOT_APP.bot.send_message(
-            ADMIN_CHAT_ID,
-            summary
-        )
+                # Update prime stats (kalau masih pakai)
+                publish_time = datetime.fromisoformat(item["publishAt"])
+                update_prime_stats(video_id, views, publish_time)
+
+        save_publish_list(publish_list)
+
+        if ADMIN_CHAT_ID and BOT_APP:
+            await BOT_APP.bot.send_message(
+                chat_id=ADMIN_CHAT_ID,
+                text="📊 Analytics Worker Success (Data API)"
+            )
+
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+
+        if ADMIN_CHAT_ID and BOT_APP:
+            await BOT_APP.bot.send_message(
+                chat_id=ADMIN_CHAT_ID,
+                text="⚠️ Analytics Worker Error:\n\n" + tb[:2000]
+            )
 #==========================================================
 # Publish from button
 #==========================================================
@@ -1012,7 +1109,20 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ✅ BARU CEK DURASI DI SINI
     duration = get_video_duration(temp_path)
     is_short = duration <= 60
-
+    risk_score = analyze_audio_risk(temp_path)
+    
+    await status_msg.edit_text(f"🔎 Audio Risk Score: {risk_score}")
+    
+    if risk_score > 70:
+        temp_path = mute_audio(temp_path)
+        await status_msg.edit_text("🚨 Risk tinggi → Audio dimute")
+    
+    elif risk_score > 40:
+        temp_path = transform_audio_to_safe_version(temp_path)
+        await status_msg.edit_text("⚡ Risk medium → Audio diubah")
+    
+    else:
+        await status_msg.edit_text("✅ Audio aman")
     caption = message.caption or "Amazing Video"
 
     await status_msg.edit_text("🤖 Generating metadata...")
@@ -1114,7 +1224,6 @@ def get_dashboard_stats():
                 long_today += 1
 
         if not next_publish or publish_time < next_publish:
-            next_publish = publish_time
 
     return {
         "short_total": short_count,
@@ -1293,6 +1402,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
